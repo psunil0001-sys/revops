@@ -1,0 +1,15 @@
+.venv/
+.agents/
+.claude/
+.cursor/
+.streamlit/
+__pycache__/
+*.pyc
+data/rag/
+data/agent_runs/
+data/raw/
+data/chroma/
+data/chroma_store/
+data/memory/
+.streamlit/secrets.toml
+log/
