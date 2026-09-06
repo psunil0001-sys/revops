@@ -30,6 +30,30 @@ def _dark_props(height: int) -> dict:
     }
 
 
+def _apply_dark_theme(chart: alt.Chart) -> alt.Chart:
+    """Bump axis / legend contrast for dark Streamlit backgrounds."""
+    return (
+        chart.configure_axis(
+            labelColor="#E2E8F0",
+            titleColor="#F8FAFC",
+            gridColor="rgba(148,163,184,0.28)",
+            domainColor="rgba(148,163,184,0.55)",
+            tickColor="rgba(148,163,184,0.45)",
+            labelFontSize=12,
+            titleFontSize=13,
+        )
+        .configure_legend(
+            labelColor="#F1F5F9",
+            titleColor="#F8FAFC",
+            labelFontSize=12,
+            titleFontSize=13,
+            symbolStrokeWidth=2,
+        )
+        .configure_view(strokeOpacity=0)
+        .configure_title(color="#F8FAFC")
+    )
+
+
 def nav_history_chart(nav_df: pd.DataFrame, height: int = 360) -> alt.Chart:
     data = nav_df.copy()
     data["Date"] = pd.to_datetime(data["Date"])
@@ -64,7 +88,9 @@ def nav_history_chart(nav_df: pd.DataFrame, height: int = 360) -> alt.Chart:
         .encode(x="Date:T")
         .transform_filter(nearest)
     )
-    return (line + points + rules).properties(**_dark_props(height)).interactive()
+    return _apply_dark_theme(
+        (line + points + rules).properties(**_dark_props(height)).interactive()
+    )
 
 
 def portfolio_value_chart(history_df: pd.DataFrame, height: int = 360) -> alt.Chart:
@@ -103,7 +129,9 @@ def portfolio_value_chart(history_df: pd.DataFrame, height: int = 360) -> alt.Ch
         )
         .add_params(nearest)
     )
-    return (area + points).properties(**_dark_props(height)).interactive()
+    return _apply_dark_theme(
+        (area + points).properties(**_dark_props(height)).interactive()
+    )
 
 
 def allocation_bar_chart(
@@ -115,7 +143,7 @@ def allocation_bar_chart(
     data = df.copy()
     highlight = alt.selection_point(fields=[category_col], on="pointerover", empty=True)
     click = alt.selection_point(fields=[category_col], toggle=True)
-    return (
+    chart = (
         alt.Chart(data)
         .mark_bar(cornerRadiusEnd=6, size=20)
         .encode(
@@ -137,6 +165,7 @@ def allocation_bar_chart(
         .add_params(highlight, click)
         .properties(**_dark_props(height))
     )
+    return _apply_dark_theme(chart)
 
 
 def allocation_pie_chart(
@@ -173,7 +202,7 @@ def allocation_pie_chart(
         .add_params(highlight, legend_sel)
         .properties(**_dark_props(height))
     )
-    return base
+    return _apply_dark_theme(base)
 
 
 def stacked_sleeve_value_chart(
@@ -191,7 +220,7 @@ def stacked_sleeve_value_chart(
     highlight = alt.selection_point(
         fields=[series_col], on="pointerover", empty=True
     )
-    return (
+    chart = (
         alt.Chart(data)
         .mark_area(opacity=0.75, line={"strokeWidth": 1.5})
         .encode(
@@ -215,6 +244,7 @@ def stacked_sleeve_value_chart(
         .properties(**_dark_props(height))
         .interactive()
     )
+    return _apply_dark_theme(chart)
 
 
 def forecast_overlay_chart(
@@ -245,7 +275,9 @@ def forecast_overlay_chart(
     )
 
     if forecast_df is None or forecast_df.empty:
-        return hist_chart.properties(**_dark_props(height)).interactive()
+        return _apply_dark_theme(
+            hist_chart.properties(**_dark_props(height)).interactive()
+        )
 
     fc = forecast_df.copy()
     fc["Date"] = pd.to_datetime(fc["Date"])
@@ -269,4 +301,6 @@ def forecast_overlay_chart(
         )
         .add_params(legend_sel)
     )
-    return (hist_chart + fc_chart).properties(**_dark_props(height)).interactive()
+    return _apply_dark_theme(
+        (hist_chart + fc_chart).properties(**_dark_props(height)).interactive()
+    )

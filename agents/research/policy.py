@@ -22,7 +22,16 @@ class PolicyAnalyst(BaseAgent):
         allowlist = contract.allowlist_domains or list(URL_ALLOWLIST_SUFFIXES)
 
         queries = list((fund.research_queries if fund else None) or [])
-        if fund and fund.type == "ulip":
+        if fund and fund.type == "nps":
+            queries.extend(
+                [
+                    "PFRDA NPS regulations India",
+                    "NPS Tier I investment guidelines PFRDA",
+                    "NPS equity corporate gilt scheme allocation rules",
+                    "pension fund regulatory changes India PFRDA",
+                ]
+            )
+        elif fund and fund.type == "ulip":
             queries.extend(
                 [
                     "IRDAI ULIP regulations India",

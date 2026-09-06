@@ -54,11 +54,8 @@ class ServerManager:
         self.start_script = Path(start_script or START_SERVERS_SCRIPT)
         self.stop_script = Path(stop_script or STOP_SERVERS_SCRIPT)
 
-        if self.chat_base_url == self.embedding_base_url:
-            raise ValueError(
-                "Chat and embedding base URLs must differ; "
-                "chat server has no embeddings API."
-            )
+        # llama.cpp uses separate chat/embed ports; Ollama shares one base URL.
+        self.shared_endpoint = self.chat_base_url == self.embedding_base_url
 
     def _probe(self, base_url: str, timeout: float = 3.0) -> dict[str, Any]:
         url = f"{base_url}/models"

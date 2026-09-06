@@ -96,19 +96,12 @@ class ManagerAgent:
             assigned_at=now,
             allowlist_domains=list(URL_ALLOWLIST_SUFFIXES),
         )
-        return [
+        contracts = [
             TaskContract(
                 agent_id="fundamentals_analyst",
                 instructions=(
                     f"Analyze fundamentals for {fund.name} ({fund.id}) "
                     f"session={session}."
-                ),
-                **common,
-            ),
-            TaskContract(
-                agent_id="sentiment_analyst",
-                instructions=(
-                    f"Gather social + RAG sentiment for {fund.name} session={session}."
                 ),
                 **common,
             ),
@@ -129,12 +122,26 @@ class ManagerAgent:
             TaskContract(
                 agent_id="policy_analyst",
                 instructions=(
-                    f"Gather SEBI/RBI/IRDAI/policy rules relevant to {fund.name} "
+                    f"Gather SEBI/RBI/IRDAI/PFRDA/policy rules relevant to {fund.name} "
                     f"(type={fund.type}) session={session}."
                 ),
                 **common,
             ),
         ]
+        # Skip Reddit/social sentiment for NPS — low signal, high noise.
+        if fund.type != "nps":
+            contracts.insert(
+                1,
+                TaskContract(
+                    agent_id="sentiment_analyst",
+                    instructions=(
+                        f"Gather social + RAG sentiment for {fund.name} "
+                        f"session={session}."
+                    ),
+                    **common,
+                ),
+            )
+        return contracts
 
     def _validate_brief(self, brief: ResearchBrief, contract: TaskContract) -> list[str]:
         hits: list[str] = []
@@ -319,6 +326,12 @@ class ManagerAgent:
         run_id = raw_store.run_id
 
         contracts = self._contracts(session, fund)
+        assigned = {c.agent_id for c in contracts}
+        for agent_id, status in statuses.items():
+            if agent_id.endswith("_analyst") and agent_id not in assigned:
+                status.status = "skipped"
+                status.notes = "not assigned for this fund type"
+                status.finished_at = datetime.now(timezone.utc)
         briefs, errors = self._run_research(
             contracts,
             fund=fund,

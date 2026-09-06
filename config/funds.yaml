@@ -18,9 +18,11 @@ funds:
       Consumer Staples: 7.76
       Other Equity: 22.46
     research_queries:
-      - "Kotak Multicap Fund"
-      - "India multicap mutual fund SEBI"
-      - "RBI interest rate India markets"
+      - "Kotak Multicap Fund Direct Growth"
+      - "Kotak Multicap Fund portfolio holdings"
+      - "India multicap mutual fund SEBI category"
+      - "SEBI multicap allocation 25 percent large mid small"
+      - "RBI interest rate India equity markets"
 
   - id: tata_aia_mmqi
     name: Tata AIA Multicap Momentum Quality Index Fund
@@ -40,10 +42,11 @@ funds:
       Automobile: 14.95
       Other Equity: 41.84
     research_queries:
-      - "Tata AIA Multicap Momentum Quality"
-      - "Nifty 500 Multicap Momentum Quality 50"
-      - "IRDAI ULIP regulations"
-      - "Tata AIA life insurance ULIP"
+      - "Tata AIA Multicap Momentum Quality Index Fund"
+      - "Nifty 500 Multicap Momentum Quality 50 index"
+      - "IRDAI ULIP regulations unit linked insurance"
+      - "Tata AIA life insurance ULIP fund performance"
+      - "momentum quality factor investing India"
 
   - id: icici_nps_e
     name: ICICI Prudential Pension Fund — Scheme E
@@ -60,9 +63,11 @@ funds:
     sectors:
       Equity: 100.0
     research_queries:
-      - "ICICI NPS Scheme E"
-      - "NPS equity"
-      - "PFRDA"
+      - "ICICI Prudential Pension Fund Scheme E equity"
+      - "NPS Scheme E equity allocation PFRDA"
+      - "PFRDA equity investment guidelines NPS"
+      - "NPS Tier I Scheme E returns India"
+      - "pension fund equity India market outlook"
 
   - id: icici_nps_c
     name: ICICI Prudential Pension Fund — Scheme C
@@ -79,9 +84,11 @@ funds:
     sectors:
       Corporate Bonds: 100.0
     research_queries:
-      - "ICICI NPS Scheme C"
-      - "NPS corporate bond"
-      - "PFRDA"
+      - "ICICI Prudential Pension Fund Scheme C corporate bond"
+      - "NPS Scheme C corporate debt PFRDA"
+      - "India corporate bond yields credit spreads"
+      - "PFRDA corporate bond investment norms NPS"
+      - "RBI monetary policy bond markets India"
 
   - id: icici_nps_g
     name: ICICI Prudential Pension Fund — Scheme G
@@ -98,6 +105,8 @@ funds:
     sectors:
       Government Securities: 100.0
     research_queries:
-      - "ICICI NPS Scheme G"
-      - "NPS government securities"
-      - "PFRDA"
+      - "ICICI Prudential Pension Fund Scheme G gilt"
+      - "NPS Scheme G government securities PFRDA"
+      - "India G-Sec yields 10 year benchmark"
+      - "PFRDA gilt investment guidelines NPS"
+      - "RBI government bond auction yields India"

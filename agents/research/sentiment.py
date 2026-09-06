@@ -54,6 +54,36 @@ class SentimentAnalyst(BaseAgent):
     def run(self, contract: TaskContract, **kwargs: Any) -> ResearchBrief:
         fund: FundConfig = kwargs["fund"]
         raw_store: RawStore | None = kwargs.get("raw_store")
+
+        # NPS has almost no useful Reddit signal; skip social scrape noise.
+        if fund.type == "nps":
+            return ResearchBrief(
+                agent_id="sentiment_analyst",
+                as_of=datetime.now(timezone.utc),
+                session=contract.session,
+                sources=["sentiment:nps_skipped"],
+                confidence=0.15,
+                claims=[
+                    Claim(
+                        text=(
+                            f"Social sentiment skipped for NPS fund {fund.id}; "
+                            "retail Reddit signal is unreliable for pension schemes."
+                        ),
+                        evidence_refs=["policy:nps_skip"],
+                    )
+                ],
+                metrics={
+                    "skipped": True,
+                    "reason": "nps_social_noise",
+                    "post_count": 0,
+                    "hit_count": 0,
+                    "errors": [],
+                    "chroma_documents": [],
+                },
+                notes="SentimentAnalyst skipped Reddit/social for NPS (PFRDA focus).",
+                raw_paths=[],
+            )
+
         queries = [
             fund.name.split(" - ")[0][:40],
             *fund.research_queries[:2],

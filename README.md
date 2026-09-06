@@ -376,7 +376,8 @@ export CHAT_MODEL=/path/to/your-chat.gguf
 export EMBED_MODEL=/path/to/your-nomic-embed.gguf
 export CHAT_PORT=8000
 export EMBED_PORT=8001
-export NGL=99                    # GPU layers for chat; embed uses -ngl 0
+export NGL=20                     # iGPU/16GB-safe; raise to 28–36 if stable (NOT 99)
+export CHAT_CTX=4096              # was 64000 — too large for shared iGPU RAM
 export EMBED_BATCH_SIZE=2048     # helps long news snippets
 ```
 

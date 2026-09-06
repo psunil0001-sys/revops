@@ -42,10 +42,16 @@ from agents.server_manager import ServerManager
 from utils.funds import (
     DashboardGroup,
     FundConfig,
+    default_focus_fund_id,
     get_fund,
+    is_group_target,
+    iter_active_targets,
     iter_dashboard_entries,
     load_funds,
+    resolve_target_funds,
+    target_label,
 )
+from urllib.parse import urlparse
 from utils.llm import check_embedding_health, check_llm_health, forecast_nav
 from utils.market import (
     attach_benchmark_features,
@@ -108,10 +114,21 @@ def _fs(fund_id: str) -> dict:
     return states[fund_id]
 
 
+def _endpoint_host_port(base_url: str) -> str:
+    """Human label like 127.0.0.1:11434 from an OpenAI-compatible base URL."""
+    raw = (base_url or "").strip() or "http://127.0.0.1"
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    host = parsed.hostname or "127.0.0.1"
+    if parsed.port:
+        return f"{host}:{parsed.port}"
+    return f"{host}:{'443' if parsed.scheme == 'https' else '80'}"
+
+
 def _init_session_state() -> None:
     defaults = {
         "fund_states": {},
         "active_fund_id": FUNDS[0].id,
+        "active_target": iter_active_targets(FUNDS)[0][0],
         "llm_base_url": DEFAULT_LLM_BASE_URL,
         "embedding_base_url": DEFAULT_EMBEDDING_BASE_URL,
         "llm_model": DEFAULT_LLM_MODEL,
@@ -125,6 +142,14 @@ def _init_session_state() -> None:
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    # Migrate older sessions that only had active_fund_id (incl. ICICI scheme ids).
+    if "active_target" not in st.session_state or not st.session_state.active_target:
+        fid = st.session_state.get("active_fund_id") or FUNDS[0].id
+        try:
+            fund = get_fund(fid)
+            st.session_state.active_target = fund.dashboard_group or fund.id
+        except KeyError:
+            st.session_state.active_target = iter_active_targets(FUNDS)[0][0]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -156,7 +181,9 @@ def refresh_nav(fund: FundConfig, *, bust_cache: bool = False) -> None:
 
 @st.fragment(run_every=60)
 def server_heartbeat(heartbeat_slot) -> None:
-    """Ping chat (:8000) and embed (:8001) /models every 60s."""
+    """Ping chat + embed /models every 60s using the configured base URLs."""
+    chat_label = _endpoint_host_port(st.session_state.llm_base_url)
+    embed_label = _endpoint_host_port(st.session_state.embedding_base_url)
     chat = check_llm_health(
         base_url=st.session_state.llm_base_url,
         api_key=st.session_state.llm_api_key or None,
@@ -179,20 +206,27 @@ def server_heartbeat(heartbeat_slot) -> None:
         c1, c2 = st.columns(2)
         with c1:
             if chat["ok"]:
-                st.success(f"Chat :8000 OK · {chat['message']}")
+                st.success(f"Chat {chat_label} OK · {chat['message']}")
             else:
                 st.error(
-                    f"Chat down · {chat.get('error') or chat['message']}"
+                    f"Chat {chat_label} down · "
+                    f"{chat.get('error') or chat['message']}"
                 )
         with c2:
             if embed["ok"]:
-                st.success(f"Embed :8001 OK · {embed['message']}")
+                st.success(f"Embed {embed_label} OK · {embed['message']}")
             else:
                 st.error(
-                    f"Embed down · {embed.get('error') or embed['message']}"
+                    f"Embed {embed_label} down · "
+                    f"{embed.get('error') or embed['message']}"
                 )
+        same = (
+            st.session_state.llm_base_url.rstrip("/")
+            == st.session_state.embedding_base_url.rstrip("/")
+        )
+        note = " · shared host (Ollama-style)" if same else ""
         st.caption(
-            f"Checked at {chat['checked_at']} · refreshes every 60s"
+            f"Checked at {chat['checked_at']} · refreshes every 60s{note}"
         )
 
 
@@ -421,9 +455,25 @@ def _render_fund_workspace(
     """Independent workspace for one fund (own NAV / agents / forecast state)."""
     fs = _fs(fund.id)
 
+    _fund_blurbs = {
+        "kotak_multicap": (
+            "Kotak Multicap — open-ended equity MF · live mfapi NAV · "
+            f"inception {fund.inception_date.strftime('%d-%b-%Y')}"
+        ),
+        "tata_aia_mmqi": (
+            "Tata AIA MMQI — ULIP index sleeve · file NAV · "
+            f"inception {fund.inception_date.strftime('%d-%b-%Y')}"
+        ),
+        "icici_nps_e": "ICICI NPS Scheme E — equity sleeve · file NAV",
+        "icici_nps_c": "ICICI NPS Scheme C — corporate-bond sleeve · file NAV",
+        "icici_nps_g": "ICICI NPS Scheme G — gilt / G-Sec sleeve · file NAV",
+    }
     st.caption(
-        f"`{fund.display_code}` · {fund.type} · "
-        f"Inception {fund.inception_date.strftime('%d-%b-%Y')}"
+        _fund_blurbs.get(
+            fund.id,
+            f"`{fund.display_code}` · {fund.type} · "
+            f"Inception {fund.inception_date.strftime('%d-%b-%Y')}",
+        )
     )
 
     if fs["nav_df_full"] is None and not fs["auto_loaded"]:
@@ -452,8 +502,13 @@ def _render_fund_workspace(
         default_start=fund.inception_date,
     )
     if nav_df.empty:
-        st.warning("No NAV rows in the selected date range.")
-        return
+        # Shared sidebar date range often snaps to the active fund's sparse
+        # window (e.g. single-day NPS CSV) and would blank other funds.
+        st.info(
+            "Selected date range has no NAV rows for this fund — "
+            "showing its full available history instead."
+        )
+        nav_df = full_df.copy()
 
     latest = nav_df.iloc[-1]
     current_nav = float(latest["NAV"])
@@ -945,12 +1000,12 @@ def _current_nav_for_fund(fund: FundConfig) -> float:
 
 
 def _inject_theme_css() -> None:
-    """Cohesive dark cyan/teal theme with subtle motion (Streamlit + CSS only)."""
+    """Cohesive dark cyan/teal theme with restrained fluid motion (CSS only)."""
     st.html(
         """
         <style>
         @keyframes revopsFadeUp {
-          from { opacity: 0; transform: translateY(10px); }
+          from { opacity: 0; transform: translateY(8px); }
           to { opacity: 1; transform: translateY(0); }
         }
         @keyframes revopsShimmer {
@@ -958,25 +1013,85 @@ def _inject_theme_css() -> None:
           50% { background-position: 100% 50%; }
           100% { background-position: 0% 50%; }
         }
-        @keyframes revopsPulseGlow {
-          0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0.15); }
-          50% { box-shadow: 0 0 18px 2px rgba(34,211,238,0.22); }
+        @keyframes revopsFloatOrb {
+          0%, 100% { transform: translate3d(0, 0, 0); opacity: 0.45; }
+          50% { transform: translate3d(12px, -18px, 0); opacity: 0.7; }
+        }
+        @keyframes revopsTabGlow {
+          0%, 100% { box-shadow: inset 0 -2px 0 0 rgba(34,211,238,0.85); }
+          50% { box-shadow: inset 0 -2px 0 0 rgba(103,232,249,1); }
+        }
+        @keyframes revopsBadgePulse {
+          0%, 100% { opacity: 0.85; }
+          50% { opacity: 1; }
         }
         .stApp {
           background:
-            radial-gradient(1200px 600px at 10% -10%, rgba(34,211,238,0.10), transparent 55%),
-            radial-gradient(900px 500px at 100% 0%, rgba(96,165,250,0.08), transparent 50%),
-            linear-gradient(180deg, #020617 0%, #0B1220 40%, #0F172A 100%);
+            radial-gradient(1100px 520px at 8% -8%, rgba(34,211,238,0.12), transparent 55%),
+            radial-gradient(900px 480px at 96% 4%, rgba(96,165,250,0.10), transparent 52%),
+            linear-gradient(180deg, #020617 0%, #0B1220 42%, #0F172A 100%);
+          /* fixed attachment can trap nested sidebar scroll in some browsers */
+          background-attachment: scroll;
+        }
+        /* Soft floating glow orbs — never intercept clicks */
+        .stApp::before,
+        .stApp::after {
+          content: "";
+          position: fixed;
+          width: 280px;
+          height: 280px;
+          border-radius: 50%;
+          pointer-events: none !important;
+          z-index: 0;
+          filter: blur(40px);
+          animation: revopsFloatOrb 14s ease-in-out infinite;
+        }
+        .stApp::before {
+          top: 12%;
+          left: 6%;
+          background: rgba(34,211,238,0.16);
+        }
+        .stApp::after {
+          bottom: 10%;
+          right: 8%;
+          background: rgba(96,165,250,0.14);
+          animation-delay: -6s;
+        }
+        .stApp > header, .stApp [data-testid="stAppViewContainer"],
+        .stApp [data-testid="stHeader"] {
+          position: relative;
+          z-index: 1;
         }
         [data-testid="stSidebar"] {
           background: linear-gradient(180deg, #020617 0%, #0B1224 100%);
           border-right: 1px solid rgba(34,211,238,0.18);
+          z-index: 2;
+          /* Keep Controls scrollable — theme must not trap wheel/touch */
+          overflow: visible !important;
+          height: 100vh;
+          max-height: 100vh;
         }
+        [data-testid="stSidebar"] > div:first-child,
+        [data-testid="stSidebarContent"],
+        [data-testid="stSidebarUserContent"],
+        section[data-testid="stSidebar"] > div {
+          height: 100% !important;
+          max-height: 100vh !important;
+          overflow-y: auto !important;
+          overflow-x: hidden !important;
+          overscroll-behavior: contain;
+          -webkit-overflow-scrolling: touch;
+        }
+        /* Don't let decorative layers steal wheel events in the sidebar */
         [data-testid="stSidebar"] * {
-          transition: color 0.2s ease, background 0.2s ease;
+          pointer-events: auto;
+        }
+        /* Readable headings / captions on dark theme */
+        h1, h2, h3, h4 {
+          color: #F8FAFC !important;
         }
         h1 {
-          background: linear-gradient(90deg, #67E8F9, #22D3EE, #60A5FA, #67E8F9);
+          background: linear-gradient(90deg, #A5F3FC, #67E8F9, #93C5FD, #A5F3FC);
           background-size: 220% auto;
           -webkit-background-clip: text;
           background-clip: text;
@@ -984,18 +1099,28 @@ def _inject_theme_css() -> None:
           animation: revopsShimmer 8s ease infinite;
           letter-spacing: -0.02em;
         }
+        [data-testid="stCaption"], .stCaption, small {
+          color: #CBD5E1 !important;
+        }
         div[data-testid="stMetric"] {
           background: linear-gradient(165deg, rgba(34,211,238,0.14), rgba(15,23,42,0.72));
           border: 1px solid rgba(34,211,238,0.32) !important;
           border-radius: 14px;
           padding: 0.45rem 0.7rem;
-          animation: revopsFadeUp 0.55s ease both, revopsPulseGlow 4.5s ease-in-out infinite;
-          transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+          /* No transform / infinite glow — they break horizontal metric rows */
+          transition: border-color 0.22s ease, box-shadow 0.22s ease;
         }
         div[data-testid="stMetric"]:hover {
-          transform: translateY(-2px);
           border-color: rgba(34,211,238,0.65) !important;
           box-shadow: 0 8px 24px rgba(34,211,238,0.12);
+        }
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetric"] [data-testid="stMarkdownContainer"] p {
+          color: #E2E8F0 !important;
+        }
+        div[data-testid="stTabs"] {
+          position: relative;
+          z-index: 2;
         }
         div[data-testid="stTabs"] button {
           transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
@@ -1006,26 +1131,37 @@ def _inject_theme_css() -> None:
           background: rgba(34,211,238,0.08);
         }
         div[data-testid="stTabs"] button[aria-selected="true"] {
-          color: #22D3EE !important;
-          border-bottom-color: #22D3EE !important;
+          color: #67E8F9 !important;
+          border-bottom-color: transparent !important;
           background: rgba(34,211,238,0.10);
+          animation: revopsTabGlow 2.8s ease-in-out infinite;
         }
+        /* Card hover lift via shadow only (no transform on metrics) */
         div[data-testid="stVerticalBlockBorderWrapper"] {
           border: 1px solid rgba(34,211,238,0.22) !important;
           border-radius: 14px !important;
           background: rgba(15,23,42,0.55);
-          animation: revopsFadeUp 0.5s ease both;
-          transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+          transition: border-color 0.2s ease, box-shadow 0.25s ease;
+          position: relative;
+          z-index: 1;
         }
         div[data-testid="stVerticalBlockBorderWrapper"]:hover {
-          border-color: rgba(34,211,238,0.45) !important;
-          box-shadow: 0 10px 28px rgba(2,6,23,0.35);
+          border-color: rgba(34,211,238,0.5) !important;
+          box-shadow: 0 12px 32px rgba(2,6,23,0.45), 0 0 0 1px rgba(34,211,238,0.12);
         }
         [data-testid="stDataFrame"] {
           border: 1px solid rgba(34,211,238,0.18);
           border-radius: 12px;
-          overflow: hidden;
-          animation: revopsFadeUp 0.45s ease both;
+          /* overflow:hidden clips dataframe scroll / column UI */
+        }
+        /* Radios / controls must stay above hero/orb layers */
+        [data-testid="stRadio"],
+        [data-testid="stRadio"] *,
+        div[role="radiogroup"],
+        div[role="radiogroup"] * {
+          position: relative;
+          z-index: 6 !important;
+          pointer-events: auto !important;
         }
         .revops-banner {
           padding: 0.85rem 1.05rem;
@@ -1033,6 +1169,9 @@ def _inject_theme_css() -> None:
           margin: 0.45rem 0 0.95rem 0;
           font-weight: 600;
           animation: revopsFadeUp 0.5s ease both;
+          position: relative;
+          z-index: 1;
+          pointer-events: none;
         }
         .revops-loss {
           background: rgba(239,68,68,0.16);
@@ -1055,18 +1194,21 @@ def _inject_theme_css() -> None:
           margin: 0.2rem 0 1rem 0;
           border: 1px solid rgba(34,211,238,0.28);
           background:
-            linear-gradient(120deg, rgba(34,211,238,0.16), rgba(96,165,250,0.08), rgba(15,23,42,0.55));
+            linear-gradient(120deg, rgba(34,211,238,0.18), rgba(96,165,250,0.10), rgba(15,23,42,0.55));
           background-size: 200% 200%;
           animation: revopsShimmer 10s ease infinite, revopsFadeUp 0.55s ease both;
+          position: relative;
+          z-index: 1;
+          pointer-events: none; /* decorative — never steal radio clicks */
         }
         .revops-hero h3 {
           margin: 0 0 0.35rem 0;
-          color: #E2E8F0;
+          color: #F8FAFC !important;
           font-weight: 700;
         }
         .revops-hero p {
           margin: 0;
-          color: #94A3B8;
+          color: #CBD5E1;
           font-size: 0.95rem;
         }
         .revops-chip {
@@ -1079,14 +1221,20 @@ def _inject_theme_css() -> None:
           color: #A5F3FC;
           font-size: 0.78rem;
           font-weight: 600;
+          animation: revopsBadgePulse 3.2s ease-in-out infinite;
         }
         button[kind="primary"] {
           box-shadow: 0 0 0 1px rgba(34,211,238,0.25), 0 6px 18px rgba(34,211,238,0.12);
-          transition: transform 0.15s ease, box-shadow 0.15s ease;
+          transition: box-shadow 0.15s ease;
         }
         button[kind="primary"]:hover {
-          transform: translateY(-1px);
           box-shadow: 0 0 0 1px rgba(34,211,238,0.4), 0 10px 22px rgba(34,211,238,0.18);
+        }
+        /* Altair / Vega legend text contrast inside iframes is limited;
+           bump surrounding chart captions instead. */
+        [data-testid="stArrowVegaLiteChart"] {
+          position: relative;
+          z-index: 1;
         }
         </style>
         """
@@ -1116,14 +1264,19 @@ def _render_group_workspace(
         f"""
         <div class="revops-hero">
           <h3>{group.display_name}</h3>
-          <p>Combined NPS sleeve overview — totals, allocation, and per-scheme detail.
-             Ask Manager / Forecast use the active scheme selector below.</p>
+          <p>Combined NPS E+C+G sleeve — totals, allocation, and per-scheme detail.
+             Sidebar Load NAV / Manager / Forecast refresh <b>all three</b> schemes;
+             the radio below only picks which scheme's Agents &amp; Forecast panel is shown.</p>
           <div style="margin-top:0.55rem">
             <span class="revops-chip">{len(funds)} schemes</span>
-            <span class="revops-chip">dashboard_group: {group.group_id}</span>
+            <span class="revops-chip">sleeve: {group.group_id}</span>
           </div>
         </div>
         """
+    )
+    st.caption(
+        "ICICI Prudential NPS sleeve — equity (E), corporate bonds (C), and gilts (G) "
+        "in one dashboard."
     )
 
     # Auto-load NAVs for sleeve members
@@ -1295,10 +1448,10 @@ def _render_group_workspace(
             st.info("No NAV history available for sleeve chart yet.")
 
     st.divider()
-    st.subheader("Active scheme for research / forecast")
+    st.subheader("Active scheme for detailed Agents / Forecast panel")
     st.caption(
-        "Ask Manager, Load NAV, and Forecast in the sidebar target this scheme. "
-        "Agents / Forecast workspace below reuses the standard per-fund view."
+        "Sidebar actions refresh the whole ICICI sleeve. This radio only chooses "
+        "which scheme's detailed Agents / Forecast workspace is shown below."
     )
     default_id = funds[0].id
     # Prefer Scheme E when present
@@ -1307,20 +1460,31 @@ def _render_group_workspace(
             default_id = f.id
             break
     options = [f.id for f in funds]
-    # Keep radio in sync with active_fund_id when already one of the group
+    radio_key = f"group_active_scheme_{group.group_id}"
+    # Keep radio aligned with sidebar when active fund is one of this group.
+    # Only mutate session_state BEFORE the radio widget binds (never after
+    # the sidebar selectbox with key="active_fund_id").
     current = st.session_state.get("active_fund_id")
-    index = options.index(current) if current in options else options.index(default_id)
+    if current in options:
+        st.session_state[radio_key] = current
+    elif radio_key not in st.session_state:
+        st.session_state[radio_key] = default_id
+
+    def _sync_group_radio_to_active(group_id: str = group.group_id) -> None:
+        chosen_id = st.session_state.get(f"group_active_scheme_{group_id}")
+        if chosen_id:
+            st.session_state["active_fund_id"] = chosen_id
+
     chosen = st.radio(
         "Active scheme",
         options=options,
-        index=index,
         format_func=lambda fid: _scheme_short_label(get_fund(fid)),
         horizontal=True,
-        key=f"group_active_scheme_{group.group_id}",
-        help="Research / forecast focus inside this combined tab.",
+        key=radio_key,
+        on_change=_sync_group_radio_to_active,
+        args=(group.group_id,),
+        help="Which ICICI scheme's Agents/Forecast panel to show (sleeve actions still update all).",
     )
-    if st.session_state.active_fund_id != chosen:
-        st.session_state.active_fund_id = chosen
 
     st.markdown("#### Scheme workspace")
     _render_fund_workspace(get_fund(chosen), start_date, end_date)
@@ -1536,11 +1700,30 @@ st.title("Multi-fund portfolio tracker")
 n_entries = len(DASHBOARD_ENTRIES)
 st.caption(
     f"{len(FUNDS)} holdings · {n_entries} dashboard tabs · "
-    "NAV + agents + forecast · polished dark UI"
+    "NAV · agents · forecast"
 )
 _inject_theme_css()
 
 today = date.today()
+# active_target drives sidebar actions (fund id OR group id).
+# active_fund_id is the focus fund (ICICI radio / single-fund target).
+
+_valid_targets = {t for t, _ in iter_active_targets(FUNDS)}
+if st.session_state.get("active_target") not in _valid_targets:
+    # Recover from legacy scheme ids stored as the selectbox value.
+    fid = st.session_state.get("active_fund_id") or FUNDS[0].id
+    try:
+        fund = get_fund(fid)
+        st.session_state.active_target = fund.dashboard_group or fund.id
+    except KeyError:
+        st.session_state.active_target = next(iter(_valid_targets))
+
+active_target = st.session_state.active_target
+target_funds = resolve_target_funds(active_target)
+# Keep focus fund inside the target set
+if st.session_state.active_fund_id not in {f.id for f in target_funds}:
+    st.session_state.active_fund_id = default_focus_fund_id(active_target)
+
 active_fund = get_fund(st.session_state.active_fund_id)
 active_fs = _fs(active_fund.id)
 active_full = active_fs["nav_df_full"]
@@ -1555,45 +1738,68 @@ if active_full is not None and not active_full.empty:
 
 with st.sidebar:
     st.header("Controls")
-    def _sidebar_fund_label(fid: str) -> str:
-        fund = next(f for f in FUNDS if f.id == fid)
-        if fund.dashboard_group:
-            return f"ICICI NPS · {_scheme_short_label(fund)}"
-        return fund.name
+    _target_options = [tid for tid, _ in iter_active_targets(FUNDS)]
+    _target_labels = dict(iter_active_targets(FUNDS))
+
+    def _on_active_target_change() -> None:
+        tid = st.session_state.get("active_target")
+        if not tid:
+            return
+        focus = default_focus_fund_id(tid)
+        # Prefer keeping current focus if still in the new target set.
+        current = st.session_state.get("active_fund_id")
+        member_ids = {f.id for f in resolve_target_funds(tid)}
+        if current not in member_ids:
+            st.session_state.active_fund_id = focus
 
     st.selectbox(
         "Active fund",
-        options=[f.id for f in FUNDS],
-        format_func=_sidebar_fund_label,
-        key="active_fund_id",
+        options=_target_options,
+        format_func=lambda tid: _target_labels.get(tid, tid),
+        key="active_target",
+        on_change=_on_active_target_change,
         help=(
-            "Sidebar actions (Load NAV, Ask Manager, Forecast) target this fund. "
-            "ICICI NPS schemes share one combined top tab; picker selects research focus."
+            "Sidebar Load NAV / Ask Manager / Forecast target this selection. "
+            "ICICI NPS is one option and refreshes all three schemes (E+C+G)."
         ),
     )
     # Re-resolve after selectbox may have updated session state
+    active_target = st.session_state.active_target
+    target_funds = resolve_target_funds(active_target)
+    if st.session_state.active_fund_id not in {f.id for f in target_funds}:
+        st.session_state.active_fund_id = default_focus_fund_id(active_target)
     active_fund = get_fund(st.session_state.active_fund_id)
     active_fs = _fs(active_fund.id)
+    target_is_group = is_group_target(active_target)
+    target_name = target_label(active_target)
 
     st.subheader("Date range")
+    # Shared across all fund tabs — initialize once to portfolio-wide bounds
+    # so switching to a single-day NPS CSV does not blank Kotak/Tata views.
+    _portfolio_min = min(f.inception_date for f in FUNDS)
+    if "nav_start_date" not in st.session_state:
+        st.session_state["nav_start_date"] = min(_portfolio_min, min_available)
+    if "nav_end_date" not in st.session_state:
+        st.session_state["nav_end_date"] = today
     start_date = st.date_input(
         "Start date",
-        value=min_available,
-        min_value=active_fund.inception_date,
+        min_value=_portfolio_min,
         max_value=today,
+        key="nav_start_date",
     )
     end_date = st.date_input(
         "End date",
-        value=today,
-        min_value=active_fund.inception_date,
+        min_value=_portfolio_min,
         max_value=today,
+        key="nav_end_date",
     )
     if start_date > end_date:
         st.error("Start date must be on or before end date.")
 
     st.caption(
+        "Shared portfolio date window (not snapped per fund). "
         "NAV from mfapi.in (AMFI-backed) or local CSV. "
-        f"Active fund inception {active_fund.inception_date.isoformat()}; "
+        f"Focus fund inception {active_fund.inception_date.isoformat()}; "
         "first published NAV may be a few days later."
     )
 
@@ -1603,34 +1809,52 @@ with st.sidebar:
         width="stretch",
         icon=":material/refresh:",
     ):
-        with st.spinner(f"Fetching NAV for {active_fund.name}…"):
-            refresh_nav(active_fund, bust_cache=True)
-        if active_fs["nav_error"] is None:
-            st.success(f"NAV updated for {active_fund.name}.")
-            active_fs["forecast"] = None
+        ok_names = []
+        err_names = []
+        label = target_name if target_is_group else active_fund.name
+        with st.spinner(f"Fetching NAV for {label}…"):
+            for fund in target_funds:
+                refresh_nav(fund, bust_cache=True)
+                fs = _fs(fund.id)
+                if fs["nav_error"] is None:
+                    fs["forecast"] = None
+                    ok_names.append(fund.id)
+                else:
+                    err_names.append(fund.id)
+        if ok_names and not err_names:
+            st.success(
+                f"NAV updated for {len(ok_names)} scheme(s): "
+                + ", ".join(ok_names)
+            )
+        elif ok_names and err_names:
+            st.warning(
+                f"NAV updated for {', '.join(ok_names)}; "
+                f"failed: {', '.join(err_names)}"
+            )
         else:
             st.error("NAV fetch failed.")
 
     st.divider()
     st.subheader("Local LLM servers")
-    st.session_state.llm_base_url = st.text_input(
+    # Bind via key= only — never assign st.session_state[key] = widget(...).
+    st.text_input(
         "Chat endpoint (completions)",
-        value=st.session_state.llm_base_url,
-        help="OpenAI-compatible chat base, e.g. http://127.0.0.1:8000/v1",
+        key="llm_base_url",
+        help="OpenAI-compatible chat base, e.g. http://127.0.0.1:11434/v1",
     )
-    st.session_state.embedding_base_url = st.text_input(
+    st.text_input(
         "Embedding endpoint",
-        value=st.session_state.embedding_base_url,
+        key="embedding_base_url",
         help="Dedicated embed server, e.g. http://127.0.0.1:8001/v1",
     )
-    st.session_state.llm_model = st.text_input(
+    st.text_input(
         "Chat model name",
-        value=st.session_state.llm_model,
-        help="Recommended: Gemma / Mistral-Nemo Instruct",
+        key="llm_model",
+        help="Recommended: Gemma / Mistral-Nemo Instruct / llama3.2:3b",
     )
-    st.session_state.llm_api_key = st.text_input(
+    st.text_input(
         "API key (optional)",
-        value=st.session_state.llm_api_key,
+        key="llm_api_key",
         type="password",
     )
 
@@ -1687,12 +1911,23 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Ask Manager — run now")
-    st.caption(
-        f"Runs for **{active_fund.name}** only. Manager starts chat+embed if "
-        "needed, assigns analysts, then Monitor refreshes NAV and runs a "
-        "**60-day** forecast. Servers are **stopped** when the run finishes. "
-        "Does **not** mark open/close as completed."
-    )
+    if target_is_group:
+        _mgr_caption = (
+            f"Runs sequentially for **all {len(target_funds)} ICICI schemes** "
+            f"({', '.join(f.id for f in target_funds)}). "
+            "Manager starts chat+embed if needed, assigns analysts, then Monitor "
+            "refreshes each scheme's own NAV and runs a **60-day** forecast. "
+            "Servers are **stopped** when the last run finishes. "
+            "Does **not** mark open/close as completed."
+        )
+    else:
+        _mgr_caption = (
+            f"Runs for **{active_fund.name}** only. Manager starts chat+embed if "
+            "needed, assigns analysts, then Monitor refreshes NAV and runs a "
+            "**60-day** forecast. Servers are **stopped** when the run finishes. "
+            "Does **not** mark open/close as completed."
+        )
+    st.caption(_mgr_caption)
     st.number_input(
         "Max parallel calls",
         min_value=1,
@@ -1732,7 +1967,13 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Forecast only")
-    st.caption(f"Targets active fund: **{active_fund.name}**")
+    if target_is_group:
+        st.caption(
+            f"Targets all ICICI schemes in **{target_name}** "
+            f"(needs ≥{MIN_FORECAST_OBSERVATIONS} NAV rows each)."
+        )
+    else:
+        st.caption(f"Targets active fund: **{active_fund.name}**")
     horizon_days = st.segmented_control(
         "Forecast horizon (trading days)",
         options=[30, 60, 90],
@@ -1751,67 +1992,96 @@ with st.sidebar:
         ),
     )
 
-# Sidebar actions for active fund
+# Sidebar actions for active target (single fund or ICICI group)
 if run_agents:
-    with st.spinner(
-        f"Manager (manual) for {active_fund.name}: "
-        "ensure servers → research → monitor → 60-day forecast…"
-    ):
-        try:
-            manager = ManagerAgent(
-                chat_base_url=st.session_state.llm_base_url,
-                embedding_base_url=st.session_state.embedding_base_url,
-            )
-            manager.runs = st.session_state.agent_run_store
-            verdict = manager.run_pipeline(
-                session="manual",
-                fund=active_fund,
-                base_url=st.session_state.llm_base_url,
-                embedding_base_url=st.session_state.embedding_base_url,
-                api_key=st.session_state.llm_api_key or None,
-                model=st.session_state.llm_model,
-                use_llm=use_llm,
-                mark_schedule_complete=False,
-                ensure_servers=bool(use_llm),
-                max_parallel_calls=int(st.session_state.max_parallel_calls),
-            )
-            _apply_manager_verdict(active_fund, verdict)
-            active_fs["agent_pipeline_error"] = None
-            if verdict.accepted:
-                st.success(
-                    f"Manager manual run accepted for {active_fund.name} "
-                    "(schedule slots unchanged)."
+    accepted_ids = []
+    warned_ids = []
+    failed = []
+    for idx, fund in enumerate(target_funds):
+        fs = _fs(fund.id)
+        # ensure_ready is idempotent; last iteration stops servers when LLM used.
+        ensure = bool(use_llm)
+        stop_after = idx == len(target_funds) - 1
+        with st.spinner(
+            f"Manager (manual) for {fund.name} "
+            f"({idx + 1}/{len(target_funds)}): "
+            "ensure servers → research → monitor → 60-day forecast…"
+        ):
+            try:
+                manager = ManagerAgent(
+                    chat_base_url=st.session_state.llm_base_url,
+                    embedding_base_url=st.session_state.embedding_base_url,
                 )
-            else:
-                st.warning(
-                    "Manager manual run finished with guardrail warnings/rejection."
+                manager.runs = st.session_state.agent_run_store
+                verdict = manager.run_pipeline(
+                    session="manual",
+                    fund=fund,
+                    base_url=st.session_state.llm_base_url,
+                    embedding_base_url=st.session_state.embedding_base_url,
+                    api_key=st.session_state.llm_api_key or None,
+                    model=st.session_state.llm_model,
+                    use_llm=use_llm,
+                    mark_schedule_complete=False,
+                    ensure_servers=ensure,
+                    stop_servers_after=stop_after,
+                    max_parallel_calls=int(st.session_state.max_parallel_calls),
                 )
-                if verdict.guardrail_hits:
-                    st.caption("; ".join(verdict.guardrail_hits[:3]))
-        except Exception as error:  # noqa: BLE001
-            active_fs["agent_pipeline_error"] = str(error)
-            st.error(f"Manager manual run failed: {error}")
+                _apply_manager_verdict(fund, verdict)
+                fs["agent_pipeline_error"] = None
+                if verdict.accepted:
+                    accepted_ids.append(fund.id)
+                else:
+                    warned_ids.append(fund.id)
+                    if verdict.guardrail_hits:
+                        st.caption(
+                            f"{fund.id}: " + "; ".join(verdict.guardrail_hits[:3])
+                        )
+            except Exception as error:  # noqa: BLE001
+                fs["agent_pipeline_error"] = str(error)
+                failed.append((fund.id, str(error)))
+    if accepted_ids and not failed and not warned_ids:
+        st.success(
+            "Manager manual run accepted for "
+            + ", ".join(accepted_ids)
+            + " (schedule slots unchanged)."
+        )
+    elif accepted_ids or warned_ids:
+        st.warning(
+            "Manager finished with mixed results — "
+            f"accepted={accepted_ids or '—'}, "
+            f"warnings={warned_ids or '—'}, "
+            f"failed={[f for f, _ in failed] or '—'}."
+        )
+    else:
+        st.error(
+            "Manager manual run failed: "
+            + "; ".join(f"{fid}: {err}" for fid, err in failed[:3])
+        )
 
 if run_forecast:
-    afull = active_fs["nav_df_full"]
-    if afull is None or afull.empty:
-        st.error("Load NAV for the active fund before running a forecast.")
-    else:
-        with st.spinner(f"Building forecast for {active_fund.name}…"):
+    hz = int(horizon_days or DEFAULT_HORIZON_DAYS)
+    ran = []
+    skipped = []
+    for fund in target_funds:
+        fs = _fs(fund.id)
+        afull = fs["nav_df_full"]
+        if afull is None or afull.empty:
+            skipped.append((fund.id, "NAV not loaded"))
+            continue
+        with st.spinner(f"Building forecast for {fund.name}…"):
             try:
                 assert_forecast_ready(
                     afull, min_observations=MIN_FORECAST_OBSERVATIONS
                 )
                 afeatures = build_nav_features(afull)
                 market_ctx = fetch_benchmark_context(
-                    active_fund.benchmark_symbol or "^NSEI",
+                    fund.benchmark_symbol or "^NSEI",
                     pd.Timestamp(afull["Date"].min()).date(),
                     pd.Timestamp(afull["Date"].max()).date(),
                 )
                 afeatures.update(
                     attach_benchmark_features(afull, market_ctx)
                 )
-                hz = int(horizon_days or DEFAULT_HORIZON_DAYS)
                 result = forecast_nav(
                     afeatures,
                     horizon_days=hz,
@@ -1828,25 +2098,43 @@ if run_forecast:
                 result["observations"] = int(
                     afeatures.get("observations") or len(afull)
                 )
-                active_fs["forecast"] = result
-                active_fs["forecast_error"] = None
-                active_fs["focus_forecast"] = True
-                active_fs["focus_agents"] = False
-                st.session_state.pop(f"main_tabs_{active_fund.id}", None)
-                st.session_state.pop(
-                    f"main_tabs_{active_fund.id}_agents", None
-                )
-                st.session_state.pop(
-                    f"main_tabs_{active_fund.id}_forecast", None
-                )
+                fs["forecast"] = result
+                fs["forecast_error"] = None
+                fs["focus_forecast"] = True
+                fs["focus_agents"] = False
+                st.session_state.pop(f"main_tabs_{fund.id}", None)
+                st.session_state.pop(f"main_tabs_{fund.id}_agents", None)
+                st.session_state.pop(f"main_tabs_{fund.id}_forecast", None)
+                ran.append(fund.id)
+                if result.get("llm_fallback"):
+                    st.warning(
+                        f"{fund.id}: LLM fallback — "
+                        f"{(result.get('disclaimer') or '')[:160]}"
+                    )
             except Exception as error:  # noqa: BLE001
-                active_fs["forecast"] = None
-                active_fs["forecast_error"] = str(error)
-                active_fs["focus_forecast"] = True
-                st.session_state.pop(f"main_tabs_{active_fund.id}", None)
-                st.session_state.pop(
-                    f"main_tabs_{active_fund.id}_forecast", None
-                )
+                fs["forecast"] = None
+                fs["forecast_error"] = str(error)
+                fs["focus_forecast"] = True
+                st.session_state.pop(f"main_tabs_{fund.id}", None)
+                st.session_state.pop(f"main_tabs_{fund.id}_forecast", None)
+                skipped.append((fund.id, str(error)))
+    if ran and not skipped:
+        st.success("Forecast ready for " + ", ".join(ran))
+    elif ran:
+        st.warning(
+            "Forecast ready for "
+            + ", ".join(ran)
+            + "; skipped/failed: "
+            + "; ".join(f"{i}: {e}" for i, e in skipped[:4])
+        )
+    else:
+        st.error(
+            "Forecast did not run — "
+            + (
+                "; ".join(f"{i}: {e}" for i, e in skipped[:4])
+                or "load NAV first."
+            )
+        )
 
 def _entry_tab_label(entry) -> str:
     if isinstance(entry, DashboardGroup):
@@ -1864,5 +2152,3 @@ for tab, entry in zip(top_tabs[1:], DASHBOARD_ENTRIES):
             _render_group_workspace(entry, start_date, end_date)
         else:
             _render_fund_workspace(entry, start_date, end_date)
-
-st.caption("Multi-fund portfolio tracker · UI refresh + combined ICICI NPS sleeve")

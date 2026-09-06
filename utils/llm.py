@@ -13,6 +13,7 @@ from utils.config import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_MODEL,
+    LLM_CHAT_TIMEOUT_S,
     LLM_TERMINAL_BAND_FRAC,
 )
 from utils.features import assert_forecast_ready, statistical_baseline_forecast
@@ -41,8 +42,9 @@ def chat_completions(
     api_key: str | None = None,
     model: str | None = None,
     temperature: float = 0.2,
+    timeout: float | None = None,
 ) -> str:
-    """Call OpenAI-compatible POST {base}/chat/completions (no read timeout)."""
+    """Call OpenAI-compatible POST {base}/chat/completions with a finite timeout."""
     settings = resolve_llm_settings(base_url, api_key, model)
     url = f"{settings['base_url']}/chat/completions"
     headers = {
@@ -55,8 +57,11 @@ def chat_completions(
         "temperature": temperature,
         "stream": False,
     }
-    # No overall timeout — local models may take several minutes.
-    response = requests.post(url, headers=headers, json=payload, timeout=None)
+    # Finite timeout (default 120s) so Forecast / Manager cannot hang indefinitely.
+    read_timeout = LLM_CHAT_TIMEOUT_S if timeout is None else float(timeout)
+    response = requests.post(
+        url, headers=headers, json=payload, timeout=read_timeout
+    )
     response.raise_for_status()
     data = response.json()
     try:
@@ -459,13 +464,25 @@ def forecast_nav(
         market_context=market_context,
         agent_context=agent_context,
     )
-    raw = chat_completions(
-        messages,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        temperature=0.2,
-    )
+    try:
+        raw = chat_completions(
+            messages,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            temperature=0.2,
+        )
+    except Exception as exc:  # noqa: BLE001 — transport / server errors
+        fallback = dict(baseline)
+        fallback["llm_raw_response"] = None
+        fallback["llm_fallback"] = True
+        fallback["source"] = "bootstrap_baseline"
+        fallback["disclaimer"] = (
+            "LLM unreachable or request failed — showing bootstrap baseline. "
+            f"({type(exc).__name__}: {exc}) "
+            "Illustrative only — not investment advice."
+        )
+        return fallback
     try:
         parsed = extract_json_object(raw)
         validated = _validate_forecast(parsed, horizon_days)

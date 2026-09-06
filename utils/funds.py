@@ -184,5 +184,70 @@ def iter_dashboard_entries(
         yield DashboardGroup(group_id=gid, funds=members)
 
 
+
+
+# Synthetic sidebar target for the combined ICICI NPS sleeve (not a fund id).
+ACTIVE_TARGET_ICICI_NPS = "icici_nps"
+
+
+def is_group_target(target_id: str) -> bool:
+    """True when ``target_id`` is a dashboard_group id (e.g. icici_nps)."""
+    if not target_id:
+        return False
+    if target_id in GROUP_DISPLAY_NAMES:
+        return True
+    return any(f.dashboard_group == target_id for f in load_funds())
+
+
+def resolve_target_funds(target_id: str) -> tuple[FundConfig, ...]:
+    """Resolve sidebar ``active_target`` to one or more FundConfig rows."""
+    if is_group_target(target_id):
+        members = get_funds_in_group(target_id)
+        if not members:
+            raise KeyError(f"Unknown group target: {target_id}")
+        return members
+    return (get_fund(target_id),)
+
+
+def default_focus_fund_id(target_id: str) -> str:
+    """Pick the focus fund id for a target (prefer Scheme E inside ICICI)."""
+    funds = resolve_target_funds(target_id)
+    for f in funds:
+        if f.id.endswith("_e") or "Scheme E" in f.name:
+            return f.id
+    return funds[0].id
+
+
+def iter_active_targets(
+    funds: tuple[FundConfig, ...] | None = None,
+) -> list[tuple[str, str]]:
+    """Sidebar Active-target options: ungrouped funds + one row per group.
+
+    Returns list of ``(target_id, label)`` in YAML / dashboard order.
+    """
+    items = funds if funds is not None else load_funds()
+    out: list[tuple[str, str]] = []
+    seen_groups: set[str] = set()
+    for fund in items:
+        gid = fund.dashboard_group
+        if not gid:
+            out.append((fund.id, fund.name))
+            continue
+        if gid in seen_groups:
+            continue
+        seen_groups.add(gid)
+        out.append((gid, group_display_name(gid)))
+    return out
+
+
+def target_label(target_id: str) -> str:
+    for tid, label in iter_active_targets():
+        if tid == target_id:
+            return label
+    if is_group_target(target_id):
+        return group_display_name(target_id)
+    return get_fund(target_id).name
+
+
 def clear_funds_cache() -> None:
     load_funds.cache_clear()
