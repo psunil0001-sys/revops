@@ -11,5 +11,6 @@ data/raw/
 data/chroma/
 data/chroma_store/
 data/memory/
+# Keep seeded ULIP CSV examples tracked; ignore ad-hoc dumps if needed
 .streamlit/secrets.toml
 log/

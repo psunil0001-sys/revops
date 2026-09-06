@@ -1,24 +1,28 @@
-"""NAV history fetching and normalization (mfapi.in — no CAPTCHA)."""
+"""NAV history fetching and normalization (mfapi.in or local CSV)."""
 
 from __future__ import annotations
 
 import json
 from datetime import date
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from utils.config import FUND_INCEPTION_DATE, MFAPI_NAV_URL, SCHEME_CODE
+from utils.config import MFAPI_NAV_URL
+from utils.funds import FundConfig
 
 
 def get_date_range(
     start_date: date | None = None,
     end_date: date | None = None,
+    *,
+    default_start: date | None = None,
 ) -> tuple[date, date]:
-    """Return inclusive start/end dates (inception → today by default)."""
-    start = start_date or FUND_INCEPTION_DATE
+    """Return inclusive start/end dates."""
+    start = start_date or default_start or date(2000, 1, 1)
     end = end_date or date.today()
     if start > end:
         raise ValueError(f"start_date {start} is after end_date {end}.")
@@ -29,9 +33,13 @@ def filter_nav_by_dates(
     nav_df: pd.DataFrame,
     start_date: date | None = None,
     end_date: date | None = None,
+    *,
+    default_start: date | None = None,
 ) -> pd.DataFrame:
     """Filter a normalized NAV DataFrame to an inclusive date window."""
-    start, end = get_date_range(start_date, end_date)
+    start, end = get_date_range(
+        start_date, end_date, default_start=default_start
+    )
     start_ts = pd.Timestamp(start)
     end_ts = pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
     filtered = nav_df[
@@ -40,17 +48,67 @@ def filter_nav_by_dates(
     return filtered
 
 
-def fetch_nav_history(
-    scheme_code: str = SCHEME_CODE,
+def fetch_nav_history_for_fund(
+    fund: FundConfig,
+    *,
     start_date: date | None = None,
     end_date: date | None = None,
+    timeout: int = 30,
+) -> pd.DataFrame:
+    """Load NAV for a fund via mfapi or local CSV."""
+    if fund.nav_source == "file":
+        return fetch_nav_from_file(
+            fund.nav_file_path(),
+            start_date=start_date or fund.inception_date,
+            end_date=end_date,
+            default_start=fund.inception_date,
+        )
+    if not fund.scheme_code:
+        raise ValueError(f"Fund {fund.id} missing scheme_code for mfapi")
+    return fetch_nav_history(
+        scheme_code=fund.scheme_code,
+        start_date=start_date or fund.inception_date,
+        end_date=end_date,
+        default_start=fund.inception_date,
+        timeout=timeout,
+    )
+
+
+def fetch_nav_from_file(
+    path: Path | None,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    default_start: date | None = None,
+) -> pd.DataFrame:
+    if path is None or not path.is_file():
+        raise FileNotFoundError(f"NAV file missing: {path}")
+    df = pd.read_csv(path)
+    # File NAVs use ISO dates (YYYY-MM-DD); mfapi uses day-first.
+    nav_df = normalize_nav_dataframe(df, dayfirst=False)
+    nav_df = filter_nav_by_dates(
+        nav_df, start_date, end_date, default_start=default_start
+    )
+    if nav_df.empty:
+        start, end = get_date_range(
+            start_date, end_date, default_start=default_start
+        )
+        raise ValueError(f"No NAV records in {path} between {start} and {end}.")
+    return nav_df
+
+
+def fetch_nav_history(
+    scheme_code: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    *,
+    default_start: date | None = None,
     timeout: int = 30,
 ) -> pd.DataFrame:
     """
     Fetch NAV history from mfapi.in and return a normalized DataFrame.
 
     Fetches full history then filters to [start_date, end_date].
-    Defaults: fund inception → system today.
     """
     url = MFAPI_NAV_URL.format(scheme_code=scheme_code)
     request = Request(
@@ -93,10 +151,14 @@ def fetch_nav_history(
 
     nav_df = parse_nav_response(payload)
     nav_df = normalize_nav_dataframe(nav_df)
-    nav_df = filter_nav_by_dates(nav_df, start_date, end_date)
+    nav_df = filter_nav_by_dates(
+        nav_df, start_date, end_date, default_start=default_start
+    )
 
     if nav_df.empty:
-        start, end = get_date_range(start_date, end_date)
+        start, end = get_date_range(
+            start_date, end_date, default_start=default_start
+        )
         raise ValueError(f"No NAV records found between {start} and {end}.")
 
     return nav_df
@@ -149,8 +211,12 @@ def _find_first_list(obj: Any) -> list | None:
     return None
 
 
-def normalize_nav_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize arbitrary NAV JSON columns to Date + NAV."""
+def normalize_nav_dataframe(
+    df: pd.DataFrame,
+    *,
+    dayfirst: bool = True,
+) -> pd.DataFrame:
+    """Normalize arbitrary NAV JSON/CSV columns to Date + NAV."""
     df = df.copy()
     columns = list(df.columns)
 
@@ -196,11 +262,10 @@ def normalize_nav_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     result["Date"] = pd.to_datetime(
         result["Date"],
         errors="coerce",
-        dayfirst=True,
+        dayfirst=dayfirst,
     )
     result = result.dropna(subset=["Date", "NAV"])
     result = result[result["NAV"] > 0]
-    # Keep 4-decimal precision for NAV accuracy.
     result["NAV"] = result["NAV"].round(4)
 
     return (

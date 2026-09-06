@@ -7,7 +7,7 @@ LOG_DIR="${ROOT}/log"
 mkdir -p "${LOG_DIR}"
 
 LLAMA_SERVER="${LLAMA_SERVER:-/home/sunny/AI/llama.cpp/build/bin/llama-server}"
-CHAT_MODEL="${CHAT_MODEL:-/home/sunny/models/gemma-4-E4B-it-UD-Q4_K_XL.gguf}"
+CHAT_MODEL="${CHAT_MODEL:-/home/sunny/models/Qwen3.5-9B-Q4_K_M.gguf}"
 EMBED_MODEL="${EMBED_MODEL:-/home/sunny/models/nomic-embed-text-v2-moe.Q8_0.gguf}"
 CHAT_PORT="${CHAT_PORT:-8000}"
 EMBED_PORT="${EMBED_PORT:-8001}"
@@ -43,6 +43,7 @@ fi
 echo "Starting chat server on :${CHAT_PORT} ..."
 nohup "${LLAMA_SERVER}" \
   -m "${CHAT_MODEL}" \
+  -c 64000 \
   -ngl "${NGL}" \
   --host 0.0.0.0 \
   --port "${CHAT_PORT}" \

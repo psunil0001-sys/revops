@@ -1,10 +1,9 @@
-"""Manager agent — assign 4 analysts, guardrails, memory, open/close orchestration."""
+"""Manager agent — 5 analysts, guardrails, per-fund memory, server lifecycle."""
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any
 from urllib.parse import urlparse
 
 from agents.contracts import (
@@ -28,11 +27,13 @@ from agents.memory.summarizer import (
 from agents.monitor import MonitorAgent
 from agents.research.fundamentals import FundamentalsAnalyst
 from agents.research.news import NewsAnalyst
+from agents.research.policy import PolicyAnalyst
 from agents.research.sentiment import SentimentAnalyst
 from agents.research.technical import TechnicalAnalyst
 from agents.scheduler import SessionRunStore, today_ist
 from agents.server_manager import ServerManager
-from utils.config import DEFAULT_EMBEDDING_BASE_URL, FUND_NAME
+from utils.config import DEFAULT_EMBEDDING_BASE_URL, MAX_PARALLEL_CALLS
+from utils.funds import FundConfig, load_funds
 
 _GUARANTEE_WORDS = (
     "guaranteed return",
@@ -47,6 +48,7 @@ _ANALYST_ORDER = {
     "sentiment_analyst": 1,
     "news_analyst": 2,
     "technical_analyst": 3,
+    "policy_analyst": 4,
 }
 
 
@@ -69,6 +71,7 @@ class ManagerAgent:
             embedding_base_url=self.servers.embedding_base_url,
         )
         self.technical = TechnicalAnalyst()
+        self.policy = PolicyAnalyst()
         self.monitor = MonitorAgent()
         self.runs = SessionRunStore()
         self._chroma: ChromaMemoryStore | None = None
@@ -85,7 +88,7 @@ class ManagerAgent:
     def chroma(self, value: ChromaMemoryStore) -> None:
         self._chroma = value
 
-    def _contracts(self, session: SessionKind) -> list[TaskContract]:
+    def _contracts(self, session: SessionKind, fund: FundConfig) -> list[TaskContract]:
         now = datetime.now(timezone.utc)
         common = dict(
             session=session,
@@ -97,32 +100,37 @@ class ManagerAgent:
             TaskContract(
                 agent_id="fundamentals_analyst",
                 instructions=(
-                    f"Analyze fund/sector/peer fundamentals for session={session}. "
-                    "Use config allocations + yfinance proxies. Do not invent holdings."
+                    f"Analyze fundamentals for {fund.name} ({fund.id}) "
+                    f"session={session}."
                 ),
                 **common,
             ),
             TaskContract(
                 agent_id="sentiment_analyst",
                 instructions=(
-                    f"Gather social + RAG/Chroma sentiment for session={session}. "
-                    "Cite sources; do not fabricate posts."
+                    f"Gather social + RAG sentiment for {fund.name} session={session}."
                 ),
                 **common,
             ),
             TaskContract(
                 agent_id="news_analyst",
                 instructions=(
-                    f"Gather fund/AMC/sector/regulatory news for session={session}. "
-                    "Ingest into RAG+Chroma. Prefer allowlisted domains."
+                    f"Gather news for {fund.name} session={session}. Prefer allowlisted domains."
                 ),
                 **common,
             ),
             TaskContract(
                 agent_id="technical_analyst",
                 instructions=(
-                    f"Compute technical indicators for India equity proxies "
-                    f"at session={session}. Use yfinance only. Do not invent prices."
+                    f"Compute technical indicators for proxies at session={session}."
+                ),
+                **common,
+            ),
+            TaskContract(
+                agent_id="policy_analyst",
+                instructions=(
+                    f"Gather SEBI/RBI/IRDAI/policy rules relevant to {fund.name} "
+                    f"(type={fund.type}) session={session}."
                 ),
                 **common,
             ),
@@ -157,17 +165,21 @@ class ManagerAgent:
         self,
         contracts: list[TaskContract],
         *,
+        fund: FundConfig,
         raw_store: RawStore,
         statuses: dict[str, AgentRunStatus],
+        max_parallel: int = 1,
     ) -> tuple[list[ResearchBrief], list[str]]:
         agents = {
             "fundamentals_analyst": self.fundamentals,
             "sentiment_analyst": self.sentiment,
             "news_analyst": self.news,
             "technical_analyst": self.technical,
+            "policy_analyst": self.policy,
         }
         briefs: list[ResearchBrief] = []
         errors: list[str] = []
+        workers = max(1, min(int(max_parallel), len(contracts) or 1))
 
         def _one(contract: TaskContract) -> ResearchBrief:
             agent = agents[contract.agent_id]
@@ -175,11 +187,12 @@ class ManagerAgent:
             statuses[contract.agent_id].started_at = datetime.now(timezone.utc)
             return agent.run(
                 contract,
+                fund=fund,
                 raw_store=raw_store,
                 run_id=raw_store.run_id,
             )
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_one, c): c for c in contracts}
             for future in as_completed(futures):
                 contract = futures[future]
@@ -190,6 +203,7 @@ class ManagerAgent:
                     if hard:
                         brief = agents[contract.agent_id].run(
                             contract,
+                            fund=fund,
                             raw_store=raw_store,
                             run_id=raw_store.run_id,
                         )
@@ -213,7 +227,6 @@ class ManagerAgent:
         return briefs, errors
 
     def _stop_servers_after_run(self, verdict: ManagerVerdict | None) -> None:
-        """Halt chat+embed after pipeline; next run will ensure_ready again."""
         try:
             result = self.servers.stop_servers()
             msg = "Servers stopped after pipeline (restart on next LLM run)."
@@ -231,6 +244,7 @@ class ManagerAgent:
         self,
         session: SessionKind = "manual",
         *,
+        fund: FundConfig | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
@@ -239,7 +253,11 @@ class ManagerAgent:
         mark_schedule_complete: bool = False,
         ensure_servers: bool = True,
         stop_servers_after: bool = True,
+        max_parallel_calls: int = MAX_PARALLEL_CALLS,
     ) -> ManagerVerdict:
+        if fund is None:
+            fund = load_funds()[0]
+
         if embedding_base_url:
             self.servers.embedding_base_url = embedding_base_url.rstrip("/")
             self.sentiment = SentimentAnalyst(
@@ -261,6 +279,7 @@ class ManagerAgent:
             "sentiment_analyst": AgentRunStatus(agent_id="sentiment_analyst"),
             "news_analyst": AgentRunStatus(agent_id="news_analyst"),
             "technical_analyst": AgentRunStatus(agent_id="technical_analyst"),
+            "policy_analyst": AgentRunStatus(agent_id="policy_analyst"),
             "monitor": AgentRunStatus(agent_id="monitor"),
         }
 
@@ -296,17 +315,22 @@ class ManagerAgent:
                     )
                 )
 
-        raw_store = RawStore.start_run(session)
+        raw_store = RawStore.start_run(session, fund_id=fund.id)
         run_id = raw_store.run_id
 
-        contracts = self._contracts(session)
+        contracts = self._contracts(session, fund)
         briefs, errors = self._run_research(
-            contracts, raw_store=raw_store, statuses=statuses
+            contracts,
+            fund=fund,
+            raw_store=raw_store,
+            statuses=statuses,
+            max_parallel=max_parallel_calls,
         )
 
         raw_store.write_meta(
             {
                 "finished_research_at": datetime.now(timezone.utc).isoformat(),
+                "fund_id": fund.id,
                 "statuses": {
                     k: v.model_dump(mode="json") for k, v in statuses.items()
                 },
@@ -331,7 +355,6 @@ class ManagerAgent:
                 )
             )
 
-        # Upsert research docs into Chroma (serial — not thread-safe concurrently)
         for brief in briefs:
             docs = (brief.metrics or {}).pop("chroma_documents", None) or []
             if not docs:
@@ -341,19 +364,20 @@ class ManagerAgent:
                     list(docs),
                     run_id=run_id,
                     agent_id=brief.agent_id,
+                    fund_id=fund.id,
                 )
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"chroma_upsert:{brief.agent_id}:{exc}")
 
-        # Related past (+ just-ingested) memory for forecasting
         memory_hits = []
         try:
             claim_bits = " ".join(
                 c.text for b in briefs for c in b.claims[:2]
             )[:800]
             memory_hits = self.chroma.query_related(
-                f"{FUND_NAME} {session} {claim_bits}",
+                f"{fund.name} {session} {claim_bits}",
                 n=8,
+                fund_id=fund.id,
             )
         except Exception as exc:  # noqa: BLE001
             errors.append(f"memory_query:{exc}")
@@ -362,6 +386,7 @@ class ManagerAgent:
         statuses["monitor"].started_at = datetime.now(timezone.utc)
         try:
             bundle = self.monitor.execute(
+                fund=fund,
                 session=session,
                 briefs=briefs,
                 horizon_days=DEFAULT_HORIZON_DAYS,
@@ -407,21 +432,25 @@ class ManagerAgent:
 
         accepted = bundle.forecast is not None and bool(bundle.summary_markdown)
 
-        # Persist memory summary
         try:
             summary = build_run_summary(
                 run_id=run_id,
                 session=session,
+                fund_name=fund.name,
+                fund_id=fund.id,
                 briefs=briefs,
                 monitor_summary=bundle.summary_markdown,
                 memory_hits=memory_hits,
             )
-            append_summary_file(summary, run_id=run_id, session=session)
+            append_summary_file(
+                summary, run_id=run_id, session=session, fund_id=fund.id
+            )
             self.chroma.upsert_memory(
                 run_id=run_id,
                 session=session,
                 summary=summary,
-                metadata={"accepted": accepted, "fund": FUND_NAME},
+                fund_id=fund.id,
+                metadata={"accepted": accepted, "fund": fund.name},
             )
         except Exception as exc:  # noqa: BLE001
             guardrail_hits.append(f"memory_write:{exc}")
@@ -435,6 +464,7 @@ class ManagerAgent:
             as_of=datetime.now(timezone.utc),
             messages=server_messages
             + [
+                f"Fund: {fund.id}",
                 f"Research analysts completed: {len(briefs)}",
                 f"Monitor NAV records: {bundle.nav_records}",
                 f"Forecast source: {bundle.forecast.get('source')}",
@@ -452,7 +482,9 @@ class ManagerAgent:
         )
 
         try:
-            persist_verdict_json(verdict.model_dump(mode="json"), run_id)
+            persist_verdict_json(
+                verdict.model_dump(mode="json"), run_id, fund_id=fund.id
+            )
         except Exception as exc:  # noqa: BLE001
             verdict.guardrail_hits.append(f"verdict_persist:{exc}")
 

@@ -13,8 +13,9 @@ from utils.config import (
     DEFAULT_EMBEDDING_BASE_URL,
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_MODEL,
+    LLM_TERMINAL_BAND_FRAC,
 )
-from utils.features import statistical_baseline_forecast
+from utils.features import assert_forecast_ready, statistical_baseline_forecast
 
 
 def resolve_llm_settings(
@@ -213,11 +214,12 @@ def _validate_forecast(forecast: dict[str, Any], horizon_days: int) -> dict[str,
 
     normalized: dict[str, Any] = {
         "horizon_days": int(forecast.get("horizon_days") or horizon_days),
+        "horizon_unit": "trading_days",
         "source": forecast.get("source") or "llm",
         "scenarios": {},
         "disclaimer": forecast.get("disclaimer")
         or (
-            "LLM-assisted projection only — not investment advice. "
+            "Illustrative LLM-refined scenarios only — not investment advice. "
             "Past performance does not guarantee future results."
         ),
     }
@@ -245,6 +247,108 @@ def _validate_forecast(forecast: dict[str, Any], horizon_days: int) -> dict[str,
     return normalized
 
 
+def _terminal(scenario: dict[str, Any]) -> float:
+    path = scenario.get("nav_path") or []
+    if not path:
+        raise ValueError("Empty nav_path")
+    return float(path[-1]["nav"])
+
+
+def _rescale_path_to_terminal(
+    path: list[dict[str, Any]],
+    new_terminal: float,
+) -> list[dict[str, Any]]:
+    if not path:
+        return path
+    old_terminal = float(path[-1]["nav"])
+    if old_terminal <= 0:
+        scale = 1.0
+    else:
+        scale = new_terminal / old_terminal
+    first = float(path[0]["nav"])
+    # Keep path shape: scale deviations from start toward new end.
+    out = []
+    n = len(path)
+    for i, point in enumerate(path):
+        t = (i + 1) / n
+        nav = float(point["nav"])
+        # Blend multiplicative scale by progress along path.
+        scaled = nav * (1.0 + (scale - 1.0) * t)
+        out.append(
+            {
+                "date": point["date"],
+                "nav": round(max(scaled, 0.01), 4),
+            }
+        )
+    out[-1]["nav"] = round(max(new_terminal, 0.01), 4)
+    # Avoid unused warning for first
+    _ = first
+    return out
+
+
+def _clamp_to_baseline(
+    llm_forecast: dict[str, Any],
+    baseline: dict[str, Any],
+    *,
+    band_frac: float = LLM_TERMINAL_BAND_FRAC,
+) -> dict[str, Any]:
+    """
+    Clamp LLM terminals near baseline; enforce bear <= base <= bull.
+
+    Returns clamped forecast, or raises ValueError if irreparable.
+    """
+    base_sc = baseline.get("scenarios") or {}
+    llm_sc = llm_forecast.get("scenarios") or {}
+    b_bear = _terminal(base_sc["bear"])
+    b_base = _terminal(base_sc["base"])
+    b_bull = _terminal(base_sc["bull"])
+    half_width = 0.5 * abs(b_bull - b_bear)
+    band = max(half_width * band_frac, abs(b_base) * 0.002, 1e-4)
+
+    targets = {}
+    for name, b_term in (("bear", b_bear), ("base", b_base), ("bull", b_bull)):
+        llm_term = _terminal(llm_sc[name])
+        targets[name] = float(min(max(llm_term, b_term - band), b_term + band))
+
+    # Enforce order after individual clamps.
+    targets["base"] = max(targets["base"], targets["bear"])
+    targets["bull"] = max(targets["bull"], targets["base"])
+    if not (targets["bear"] <= targets["base"] <= targets["bull"]):
+        raise ValueError("Unable to enforce bear <= base <= bull after clamp")
+
+    clamped = dict(llm_forecast)
+    clamped_scenarios = {}
+    for name in ("bear", "base", "bull"):
+        path = list((llm_sc[name] or {}).get("nav_path") or [])
+        # Prefer baseline dates for trading-day alignment.
+        base_path = list((base_sc[name] or {}).get("nav_path") or [])
+        if base_path and len(base_path) == len(path):
+            aligned = [
+                {"date": bp["date"], "nav": pp["nav"]}
+                for bp, pp in zip(base_path, path)
+            ]
+        elif base_path:
+            aligned = [
+                {"date": bp["date"], "nav": bp["nav"]} for bp in base_path
+            ]
+            # Seed with LLM relative move then rescale
+            aligned = _rescale_path_to_terminal(aligned, targets[name])
+        else:
+            aligned = path
+        clamped_scenarios[name] = {
+            "nav_path": _rescale_path_to_terminal(aligned, targets[name]),
+            "rationale": (
+                str((llm_sc[name] or {}).get("rationale") or "").strip()
+                + f" | Clamped terminal to baseline band (±{band_frac:.0%} half-width)."
+            ).strip(" |"),
+        }
+    clamped["scenarios"] = clamped_scenarios
+    clamped["source"] = "llm_clamped"
+    clamped["horizon_unit"] = "trading_days"
+    clamped["llm_clamped"] = True
+    return clamped
+
+
 def build_forecast_messages(
     features: dict[str, Any],
     horizon_days: int,
@@ -255,16 +359,26 @@ def build_forecast_messages(
     compact_features = {
         k: v
         for k, v in features.items()
-        if k != "recent_series"
+        if k not in ("recent_series", "daily_returns")
     }
+    # Drop bulky close series from market_context in the prompt.
+    market_compact = None
+    if market_context:
+        market_compact = {
+            k: v for k, v in market_context.items() if k != "closes"
+        }
     recent_tail = features.get("recent_series", [])[-45:]
+    b_bear = _terminal((baseline.get("scenarios") or {})["bear"])
+    b_bull = _terminal((baseline.get("scenarios") or {})["bull"])
+    half = 0.5 * abs(b_bull - b_bear)
+    band = max(half * LLM_TERMINAL_BAND_FRAC, 1e-4)
     user_payload = {
-        "task": "Forecast mutual fund NAV scenarios",
-        "horizon_calendar_days": horizon_days,
+        "task": "Refine bootstrap NAV scenarios (trading days)",
+        "horizon_trading_days": horizon_days,
         "features": compact_features,
         "recent_nav_tail": recent_tail,
-        "statistical_baseline": baseline,
-        "market_context": market_context,
+        "bootstrap_baseline": baseline,
+        "market_context": market_compact,
         "agent_context": agent_context,
         "output_schema": {
             "horizon_days": horizon_days,
@@ -286,12 +400,14 @@ def build_forecast_messages(
         },
         "rules": [
             "Return ONLY valid JSON matching output_schema.",
-            "Use exactly bear, base, and bull scenarios.",
-            f"Each nav_path must include about {horizon_days} daily points after last_date.",
+            "Use exactly bear, base, and bull scenarios with bear <= base <= bull terminals.",
+            f"Each nav_path must include about {horizon_days} trading-day points after last_date.",
             "NAV values must use 4 decimal places and stay positive.",
-            "Ground rationales in the provided features, baseline, and agent_context; do not invent holdings.",
+            "Ground rationales in features, bootstrap_baseline, and agent_context; do not invent holdings.",
             "Use research briefs/sentiment as qualitative context only; do not claim guaranteed returns.",
-            "You may refine the statistical baseline but keep paths plausible.",
+            f"Refine bootstrap terminals only within ±{band:.4f} NAV of each baseline terminal "
+            f"(band = {LLM_TERMINAL_BAND_FRAC:.0%} of half bull−bear width).",
+            "Keep path shapes close to the bootstrap baseline.",
         ],
     }
     return [
@@ -299,7 +415,8 @@ def build_forecast_messages(
             "role": "system",
             "content": (
                 "You are a careful quantitative assistant for mutual-fund NAV scenario "
-                "analysis. You never give personalized investment advice. "
+                "analysis. You refine bootstrap baselines within a tight band. "
+                "You never give personalized investment advice. "
                 "Respond with JSON only."
             ),
         },
@@ -322,11 +439,13 @@ def forecast_nav(
     use_llm: bool = True,
 ) -> dict[str, Any]:
     """
-    Produce bull/base/bear NAV forecast via the local chat LLM.
+    Produce bull/base/bear NAV forecast.
 
-    When use_llm=False, returns the statistical baseline used as prompt context only.
-    LLM failures raise — no silent statistical substitute.
+    Baseline is bootstrap (trading days). When use_llm=True, LLM may refine
+    within a clamp band; irreparable LLM output falls back to baseline and
+    keeps llm_raw_response.
     """
+    assert_forecast_ready(features)
     baseline = statistical_baseline_forecast(features, horizon_days=horizon_days)
     if not use_llm:
         baseline = dict(baseline)
@@ -347,8 +466,20 @@ def forecast_nav(
         model=model,
         temperature=0.2,
     )
-    parsed = extract_json_object(raw)
-    validated = _validate_forecast(parsed, horizon_days)
-    validated["source"] = "llm"
-    validated["llm_raw_response"] = raw
-    return validated
+    try:
+        parsed = extract_json_object(raw)
+        validated = _validate_forecast(parsed, horizon_days)
+        clamped = _clamp_to_baseline(validated, baseline)
+        clamped["llm_raw_response"] = raw
+        clamped["llm_fallback"] = False
+        return clamped
+    except Exception:
+        fallback = dict(baseline)
+        fallback["llm_raw_response"] = raw
+        fallback["llm_fallback"] = True
+        fallback["source"] = "bootstrap_baseline"
+        fallback["disclaimer"] = (
+            "LLM refine failed or violated clamps — showing bootstrap baseline. "
+            "Illustrative only — not investment advice."
+        )
+        return fallback

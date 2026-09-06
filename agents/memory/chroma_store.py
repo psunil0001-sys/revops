@@ -105,6 +105,7 @@ class ChromaMemoryStore:
         *,
         run_id: str,
         agent_id: str,
+        fund_id: str = "default",
     ) -> list[str]:
         if not documents:
             return []
@@ -115,12 +116,13 @@ class ChromaMemoryStore:
             title = sanitize_embed_text(str(doc.get("title") or "untitled"), max_chars=200)
             text = sanitize_embed_text(str(doc.get("text") or ""), max_chars=1000)
             body = sanitize_embed_text(f"{title}. {text}", max_chars=1200)
-            doc_id = self._doc_id(run_id, agent_id, title, body[:200])
+            doc_id = self._doc_id(fund_id, run_id, agent_id, title, body[:200])
             ids.append(doc_id)
             texts.append(body)
             metadatas.append(
                 {
                     "run_id": run_id,
+                    "fund_id": fund_id,
                     "agent_id": agent_id,
                     "title": title[:200],
                     "source": str(doc.get("source") or agent_id)[:200],
@@ -128,7 +130,6 @@ class ChromaMemoryStore:
                     "collection": RESEARCH_COLLECTION,
                 }
             )
-        # Upsert one-at-a-time so a single bad doc doesn't fail the whole agent batch
         written: list[str] = []
         with self._lock:
             for doc_id, body, meta in zip(ids, texts, metadatas):
@@ -146,12 +147,14 @@ class ChromaMemoryStore:
         run_id: str,
         session: str,
         summary: str,
+        fund_id: str = "default",
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        doc_id = self._doc_id("memory", run_id, summary[:120])
+        doc_id = self._doc_id("memory", fund_id, run_id, summary[:120])
         body = sanitize_embed_text(summary, max_chars=2000)
         meta = {
             "run_id": run_id,
+            "fund_id": fund_id,
             "session": session,
             "title": f"Run summary {run_id}",
             "collection": MEMORY_COLLECTION,
@@ -165,12 +168,19 @@ class ChromaMemoryStore:
             )
         return doc_id
 
-    def query_related(self, query: str, n: int = 8) -> list[MemoryHit]:
+    def query_related(
+        self,
+        query: str,
+        n: int = 8,
+        *,
+        fund_id: str | None = None,
+    ) -> list[MemoryHit]:
         if not query.strip():
             return []
         query = sanitize_embed_text(query, max_chars=800)
         per = max(1, (n + 1) // 2)
         hits: list[MemoryHit] = []
+        where = {"fund_id": fund_id} if fund_id else None
         with self._lock:
             for collection, name in (
                 (self.research, RESEARCH_COLLECTION),
@@ -182,17 +192,33 @@ class ChromaMemoryStore:
                     raise RuntimeError(f"Chroma count failed ({name}): {exc}") from exc
                 if count <= 0:
                     continue
-                result = collection.query(
-                    query_texts=[query],
-                    n_results=min(per, count),
-                    include=["documents", "metadatas", "distances"],
-                )
+                kwargs: dict[str, Any] = {
+                    "query_texts": [query],
+                    "n_results": min(per, count),
+                    "include": ["documents", "metadatas", "distances"],
+                }
+                if where:
+                    kwargs["where"] = where
+                try:
+                    result = collection.query(**kwargs)
+                except Exception:
+                    # Older collections may lack fund_id metadata — query without filter
+                    if where:
+                        result = collection.query(
+                            query_texts=[query],
+                            n_results=min(per, count),
+                            include=["documents", "metadatas", "distances"],
+                        )
+                    else:
+                        raise
                 docs = (result.get("documents") or [[]])[0]
                 metas = (result.get("metadatas") or [[]])[0]
                 dists = (result.get("distances") or [[]])[0]
                 ids = (result.get("ids") or [[]])[0]
                 for i, text in enumerate(docs):
                     meta = metas[i] if i < len(metas) else {}
+                    if fund_id and meta and meta.get("fund_id") not in (None, fund_id):
+                        continue
                     dist = dists[i] if i < len(dists) else None
                     score = None if dist is None else float(1.0 / (1.0 + float(dist)))
                     hits.append(

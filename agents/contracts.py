@@ -14,6 +14,7 @@ AgentId = Literal[
     "sentiment_analyst",
     "news_analyst",
     "technical_analyst",
+    "policy_analyst",
     "monitor",
     "manager",
 ]
@@ -40,6 +41,10 @@ URL_ALLOWLIST_SUFFIXES = (
     "yahoo.com",
     "newsapi.org",
     "reddit.com",
+    "irdai.gov.in",
+    "incometax.gov.in",
+    "indiabudget.gov.in",
+    "tataaia.com",
 )
 
 

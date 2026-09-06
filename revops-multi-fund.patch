@@ -1,0 +1,1632 @@
+diff --git
+--- a/.gitignore	2026-08-24 11:50:35.000000000 +0000
++++ b/.gitignore	2026-09-06 17:09:59.771448963 +0000
+@@ -11,5 +11,9 @@
+ data/chroma/
+ data/chroma_store/
+ data/memory/
++# Runtime daily snapshots (keep committed seed)
++data/snapshots/*
++!data/snapshots/.gitkeep
++!data/snapshots/2026-09-06.json
+ .streamlit/secrets.toml
+ log/
+diff --git
+--- a/README.md	2026-08-24 11:50:35.000000000 +0000
++++ b/README.md	2026-09-06 17:11:44.894859704 +0000
+@@ -1,16 +1,18 @@
+-# RevOps — Kotak Multicap Portfolio Tracker
++# RevOps — Multi-Fund Portfolio Tracker
+ 
+-Interactive Streamlit app for tracking **Kotak Multicap Fund - Regular Plan - Growth** (scheme `149182`), with a **Manager-orchestrated multi-analyst research pipeline**, **Chroma memory**, and a **local LLM 60-day NAV scenario forecast**.
++Interactive Streamlit app for a **5-holding portfolio** (ICICI NPS E/C/G, Kotak Multicap, Tata ULIP MQI), with **daily snapshots**, **mfapi NAV refresh** for Kotak, **manual NAV** for NPS/ULIP, plus the existing **Manager-orchestrated research pipeline** and **local LLM 60-day Kotak NAV forecast**.
+ 
+ > Research and scenario forecasts only — **not investment advice**. Past performance does not guarantee future results.
+ 
++**Basic multi-fund Overview / Allocations / snapshot charts do not require llama servers.**
++
+ ---
+ 
+ ## What it does
+ 
+ | Area | Capability |
+ |------|------------|
+-| **Portfolio** | NAV history (mfapi.in), P&L, ROI, CAGR, drawdown, allocations |
++| **Portfolio** | Multi-fund totals + allocations, daily snapshots, Kotak NAV (mfapi.in), P&L/ROI for Kotak sleeve |
+ | **Research** | Four analysts: Fundamentals, Sentiment, News, Technical |
+ | **Memory** | Raw JSON under `data/raw/`, Chroma vectors, run summaries |
+ | **Forecast** | Bull / base / bear 60-day NAV paths via local chat LLM |
+@@ -181,19 +183,25 @@
+ ├── agent_runs/
+ │   ├── {run_id}.json             # full ManagerVerdict snapshot
+ │   └── sessions.jsonl            # scheduled open/close completion
++├── snapshots/
++│   └── YYYY-MM-DD.json           # daily multi-fund valuation (seed: 2026-09-06.json)
+ └── docs/                         # optional local .txt/.md/.csv to ingest
+ ```
+ 
+-### Fund snapshot (config)
++### Holdings snapshot (config) — as of 2026-09-06 (Asia/Kolkata)
++
++| Holding | Units | NAV | Value (₹) | NAV source |
++|---------|------:|----:|----------:|------------|
++| ICICI Prudential Pension Fund — Scheme E | 976.3060 | 74.2416 | 72,482.51 | `manual_nav` |
++| ICICI Prudential Pension Fund — Scheme C | 911.6690 | 46.5038 | 42,396.07 | `manual_nav` |
++| ICICI Prudential Pension Fund — Scheme G | 731.0734 | 38.6797 | 28,277.69 | `manual_nav` |
++| Kotak Multicap Fund Regular Growth | 4926.833 | 20.18 | 99,423 | `mfapi` scheme `149182` |
++| Tata ULIP MQI | 4737.5444 | 9.27 | 43,917.04 | `manual_nav` |
++| **Total** | | | **≈ 286,496.31** | |
+ 
+-| Field | Value |
+-|-------|--------|
+-| Scheme | `149182` |
+-| Name | Kotak Multicap Fund - Regular Plan - Growth |
+-| Inception | 2021-09-29 |
+-| Default holding | ₹99,995 @ NAV 20.30 |
++Edit holdings in [`utils/config.py`](utils/config.py). Kotak sector weights remain for the research sleeve.
+ 
+-Edit holdings and sector weights in [`utils/config.py`](utils/config.py).
++**Scheme-code notes:** Only Kotak has a public AMFI/mfapi scheme code (`149182`). ICICI NPS E/C/G and Tata ULIP MQI have **no mfapi scheme codes** in this tracker — mark/update them via `manual_nav` snapshots.
+ 
+ ---
+ 
+@@ -216,8 +224,8 @@
+ │   ├── research/             # four analysts
+ │   ├── memory/               # raw store, Chroma, summarizer
+ │   └── rag/                  # BM25 + semantic hybrid
+-├── utils/                    # config, nav, llm, embeddings, charts
+-├── data/                     # runtime artifacts (gitignored)
++├── utils/                    # config, nav, portfolio, snapshots, llm, charts
++├── data/                     # runtime artifacts (gitignored except seed snapshot)
+ └── log/                      # llama-server pid + logs
+ ```
+ 
+@@ -279,12 +287,11 @@
+ 
+ ### 4. First-run checklist
+ 
+-1. Sidebar → confirm chat / embed URLs (defaults `:8000` / `:8001`).
+-2. **Load / refresh NAV** (or wait for auto-load).
+-3. Toggle **Use local LLM** on.
+-4. Click **Ask Manager: run now**.
+-5. Open the **Agents** tab for statuses, briefs, raw paths, memory hits.
+-6. Open **Forecast** for scenarios and raw LLM JSON.
++1. Open **Overview** — five holdings + total should show from config/seed snapshot (no llama needed).
++2. Sidebar → **Load / refresh NAV** to update Kotak via mfapi (NPS/ULIP stay on last manual NAV).
++3. **Save today's snapshot** to append `data/snapshots/YYYY-MM-DD.json`.
++4. (Optional research) Sidebar → chat/embed URLs → **Use local LLM** → **Ask Manager: run now**.
++5. Open **Agents** / **Forecast** for Kotak research + portfolio projection (Kotak path + flat manual).
+ 
+ Heartbeat badges refresh about every 60s. After a Manager run, servers should show down until the next LLM pipeline (or manual **Start servers**).
+ 
+@@ -302,6 +309,18 @@
+ 
+ ---
+ 
++## Daily tracking
++
++1. **Refresh Kotak NAV** — sidebar **Load / refresh NAV** (mfapi scheme `149182`).
++2. **Update manual NAVs** — edit `snapshot_nav` / units in `utils/config.py`, *or* save a snapshot after overriding NAVs in a small script using `utils.snapshots.build_snapshot_from_holdings(..., nav_overrides={...})`.
++3. **Persist the day** — sidebar **Save today's snapshot** → `data/snapshots/YYYY-MM-DD.json`.
++4. **Day-over-day** — Overview shows delta vs previous snapshot when ≥2 days exist.
++5. Seed file `data/snapshots/2026-09-06.json` is committed; other snapshot files are gitignored.
++
++Helpers: `utils/snapshots.py` — `load_snapshot`, `save_snapshot`, `list_snapshots`, `day_over_day_change`, `seed_baseline_snapshot`.
++
++---
++
+ ## Typical usage
+ 
+ ```mermaid
+diff --git
+--- a/dashboard.py	2026-08-24 11:50:35.000000000 +0000
++++ b/dashboard.py	2026-09-06 17:14:00.882155849 +0000
+@@ -1,4 +1,4 @@
+-"""Kotak Multicap Fund portfolio tracker — interactive Streamlit UI."""
++"""Multi-fund portfolio tracker — interactive Streamlit UI."""
+ 
+ from __future__ import annotations
+ 
+@@ -20,7 +20,10 @@
+     EQUITY_ALLOCATION,
+     FUND_INCEPTION_DATE,
+     FUND_NAME,
++    HOLDINGS,
++    HOLDINGS_AS_OF,
+     INVESTMENT,
++    PORTFOLIO_SNAPSHOT_TOTAL,
+     PURCHASE_NAV,
+     SCHEME_CODE,
+     UNITS_HELD,
+@@ -40,17 +43,31 @@
+ from agents.server_manager import ServerManager
+ from utils.llm import check_embedding_health, check_llm_health, forecast_nav
+ from utils.market import fetch_nifty_context
+-from utils.nav import fetch_nav_history, filter_nav_by_dates
++from utils.nav import (
++    fetch_live_navs_for_holdings,
++    fetch_nav_history,
++    filter_nav_by_dates,
++)
+ from utils.portfolio import (
+     build_portfolio_history,
++    calculate_multi_fund_portfolio,
+     calculate_portfolio,
+     get_asset_dataframe,
+     get_sector_dataframe,
++    holdings_allocation_dataframe,
+     inr,
++    project_portfolio_scenarios,
++)
++from utils.snapshots import (
++    build_snapshot_from_holdings,
++    day_over_day_change,
++    save_snapshot,
++    seed_baseline_snapshot,
++    snapshots_to_history_df,
+ )
+ 
+ st.set_page_config(
+-    page_title="Kotak Multicap Portfolio",
++    page_title="RevOps Multi-Fund Portfolio",
+     page_icon=":material/account_balance:",
+     layout="wide",
+ )
+@@ -60,7 +77,10 @@
+     defaults = {
+         "nav_df_full": None,
+         "nav_error": None,
++        "live_navs": {},
++        "live_navs_error": None,
+         "auto_loaded": False,
++        "snapshot_message": None,
+         "forecast": None,
+         "forecast_error": None,
+         "focus_forecast": False,
+@@ -104,6 +124,12 @@
+     except Exception as error:  # noqa: BLE001
+         st.session_state.nav_df_full = None
+         st.session_state.nav_error = str(error)
++    try:
++        st.session_state.live_navs = fetch_live_navs_for_holdings(HOLDINGS)
++        st.session_state.live_navs_error = None
++    except Exception as error:  # noqa: BLE001
++        st.session_state.live_navs = st.session_state.get("live_navs") or {}
++        st.session_state.live_navs_error = str(error)
+ 
+ 
+ @st.fragment(run_every=60)
+@@ -339,10 +365,14 @@
+             st.error("Scheduled pipeline rejected by guardrails.")
+ 
+ 
+-st.title("Kotak Multicap Fund portfolio tracker")
++st.title("RevOps multi-fund portfolio tracker")
+ st.caption(
+-    f"{FUND_NAME} · Scheme `{SCHEME_CODE}` · "
+-    f"Inception {FUND_INCEPTION_DATE.strftime('%d-%b-%Y')}"
++    f"{len(HOLDINGS)} holdings · snapshot as of {HOLDINGS_AS_OF.isoformat()} · "
++    f"Kotak scheme `{SCHEME_CODE}` (mfapi) · NPS/ULIP manual NAV"
++)
++st.caption(
++    "Research and scenario forecasts only — **not investment advice**. "
++    "Past performance does not guarantee future results."
+ )
+ 
+ today = date.today()
+@@ -389,10 +419,42 @@
+         with st.spinner("Fetching NAV history…"):
+             refresh_nav(bust_cache=True)
+         if st.session_state.nav_error is None:
+-            st.success("NAV history updated.")
++            st.success("Kotak NAV history updated.")
+             st.session_state.forecast = None
+         else:
+-            st.error("NAV fetch failed.")
++            st.warning(
++                "Kotak NAV history fetch failed — using snapshot / manual NAVs "
++                "for multi-fund overview."
++            )
++            st.caption(st.session_state.nav_error)
++        if st.session_state.live_navs_error:
++            st.caption(f"Live NAV note: {st.session_state.live_navs_error}")
++
++    st.subheader("Daily snapshots")
++    st.caption(
++        "Snapshots live under `data/snapshots/YYYY-MM-DD.json`. "
++        "Seed file `2026-09-06.json` is committed; later days are gitignored."
++    )
++    seed_baseline_snapshot(overwrite=False)
++    if st.button(
++        "Save today's snapshot",
++        width="stretch",
++        icon=":material/save:",
++        help="Persist current multi-fund valuation (live Kotak NAV + manual NAVs).",
++    ):
++        live = st.session_state.get("live_navs") or {}
++        snap = build_snapshot_from_holdings(
++            HOLDINGS,
++            as_of=date.today(),
++            nav_overrides=live or None,
++            source="dashboard",
++        )
++        dest = save_snapshot(snap, overwrite=True)
++        st.session_state.snapshot_message = f"Saved {dest.name} (total {snap['total_value']})"
++        st.success(st.session_state.snapshot_message)
++
++    if st.session_state.snapshot_message:
++        st.caption(st.session_state.snapshot_message)
+ 
+     st.divider()
+     st.subheader("Local LLM servers")
+@@ -518,36 +580,68 @@
+         help="Skip research agents; statistical/LLM forecast only",
+     )
+ 
++# Ensure seed snapshot exists for multi-fund overview (no llama required).
++seed_baseline_snapshot(overwrite=False)
++
+ if st.session_state.nav_df_full is None and not st.session_state.auto_loaded:
+     st.session_state.auto_loaded = True
+-    with st.spinner("Loading NAV history…"):
++    with st.spinner("Loading Kotak NAV history (optional for overview)…"):
+         refresh_nav()
+ 
+ full_df = st.session_state.nav_df_full
+ 
+ if st.session_state.nav_error:
+-    st.error(st.session_state.nav_error)
+-
+-if full_df is None or full_df.empty:
+-    st.info("Click **Load / refresh NAV** to populate the dashboard.")
+-    st.stop()
++    st.warning(
++        "Kotak NAV history unavailable — multi-fund overview still works from "
++        "config / snapshots. Agent Forecast for Kotak needs a successful NAV load."
++    )
++    with st.expander("NAV error details"):
++        st.code(st.session_state.nav_error)
+ 
+ if start_date > end_date:
+     st.stop()
+ 
+-nav_df = filter_nav_by_dates(full_df, start_date, end_date)
+-if nav_df.empty:
+-    st.warning("No NAV rows in the selected date range.")
+-    st.stop()
++nav_df = None
++current_nav = float(
++    next(h["snapshot_nav"] for h in HOLDINGS if h["id"] == "kotak_multicap")
++)
++nav_date = HOLDINGS_AS_OF
++portfolio = None
++portfolio_history = None
++features = None
++nav_spark = []
++value_spark = []
+ 
+-latest = nav_df.iloc[-1]
+-current_nav = float(latest["NAV"])
+-nav_date = latest["Date"]
+-portfolio = calculate_portfolio(current_nav)
+-portfolio_history = build_portfolio_history(nav_df)
+-features = build_nav_features(nav_df)
+-nav_spark = nav_df["NAV"].tail(30).tolist()
+-value_spark = portfolio_history["Portfolio Value"].tail(30).tolist()
++if full_df is not None and not full_df.empty:
++    nav_df = filter_nav_by_dates(full_df, start_date, end_date)
++    if nav_df.empty:
++        st.warning("No Kotak NAV rows in the selected date range.")
++        nav_df = None
++    else:
++        latest = nav_df.iloc[-1]
++        current_nav = float(latest["NAV"])
++        nav_date = latest["Date"]
++        portfolio = calculate_portfolio(current_nav)
++        portfolio_history = build_portfolio_history(nav_df)
++        features = build_nav_features(nav_df)
++        nav_spark = nav_df["NAV"].tail(30).tolist()
++        value_spark = portfolio_history["Portfolio Value"].tail(30).tolist()
++else:
++    portfolio = calculate_portfolio(current_nav)
++
++# Multi-fund valuation (live Kotak NAV when available; else snapshot NAVs).
++live_navs = dict(st.session_state.get("live_navs") or {})
++if "kotak_multicap" not in live_navs and portfolio is not None:
++    live_navs["kotak_multicap"] = current_nav
++multi_portfolio = calculate_multi_fund_portfolio(HOLDINGS, live_navs=live_navs)
++holdings_df = holdings_allocation_dataframe(multi_portfolio)
++snapshot_history = snapshots_to_history_df()
++dod = day_over_day_change()
++portfolio_value_spark = (
++    snapshot_history["Portfolio Value"].tail(30).tolist()
++    if not snapshot_history.empty
++    else [multi_portfolio["total_value"]]
++)
+ 
+ if run_agents:
+     with st.spinner(
+@@ -587,30 +681,37 @@
+             st.error(f"Manager manual run failed: {error}")
+ 
+ if run_forecast:
+-    with st.spinner("Building forecast…"):
+-        market_ctx = load_nifty_context(
+-            pd.Timestamp(nav_df["Date"].min()).date(),
+-            pd.Timestamp(nav_df["Date"].max()).date(),
++    if nav_df is None or features is None:
++        st.session_state.forecast_error = (
++            "Kotak NAV history required for forecast. Click **Load / refresh NAV**."
+         )
+-        try:
+-            st.session_state.forecast = forecast_nav(
+-                features,
+-                horizon_days=int(horizon_days or 30),
+-                base_url=st.session_state.llm_base_url,
+-                api_key=st.session_state.llm_api_key or None,
+-                model=st.session_state.llm_model,
+-                market_context=market_ctx,
+-                use_llm=use_llm,
++        st.session_state.focus_forecast = True
++        st.session_state.pop("main_dashboard_tabs", None)
++    else:
++        with st.spinner("Building forecast…"):
++            market_ctx = load_nifty_context(
++                pd.Timestamp(nav_df["Date"].min()).date(),
++                pd.Timestamp(nav_df["Date"].max()).date(),
+             )
+-            st.session_state.forecast_error = None
+-            st.session_state.focus_forecast = True
+-            # Remount tabs so Forecast becomes the active tab.
+-            st.session_state.pop("main_dashboard_tabs", None)
+-        except Exception as error:  # noqa: BLE001
+-            st.session_state.forecast = None
+-            st.session_state.forecast_error = str(error)
+-            st.session_state.focus_forecast = True
+-            st.session_state.pop("main_dashboard_tabs", None)
++            try:
++                st.session_state.forecast = forecast_nav(
++                    features,
++                    horizon_days=int(horizon_days or 30),
++                    base_url=st.session_state.llm_base_url,
++                    api_key=st.session_state.llm_api_key or None,
++                    model=st.session_state.llm_model,
++                    market_context=market_ctx,
++                    use_llm=use_llm,
++                )
++                st.session_state.forecast_error = None
++                st.session_state.focus_forecast = True
++                # Remount tabs so Forecast becomes the active tab.
++                st.session_state.pop("main_dashboard_tabs", None)
++            except Exception as error:  # noqa: BLE001
++                st.session_state.forecast = None
++                st.session_state.forecast_error = str(error)
++                st.session_state.focus_forecast = True
++                st.session_state.pop("main_dashboard_tabs", None)
+ 
+ # --- Overview metrics ---
+ # Color accents (user-requested visible coloring on dark theme)
+@@ -652,11 +753,12 @@
+     """
+ )
+ 
+-pl_positive = portfolio["profit_loss"] >= 0
++delta_vs_seed = multi_portfolio["delta_vs_snapshot"]
++pl_positive = delta_vs_seed >= 0
+ if pl_positive:
+-    st.html('<div class="revops-banner revops-gain">Status: Profit</div>')
++    st.html('<div class="revops-banner revops-gain">Status: At or above seed snapshot</div>')
+ else:
+-    st.html('<div class="revops-banner revops-loss">Status: Loss</div>')
++    st.html('<div class="revops-banner revops-loss">Status: Below seed snapshot</div>')
+ 
+ if st.session_state.forecast is not None:
+     st.html(
+@@ -665,14 +767,46 @@
+         '</div>'
+     )
+ 
+-st.subheader("Fund snapshot")
++st.subheader("Portfolio snapshot")
++with st.container(horizontal=True):
++    st.metric(
++        "Total value",
++        inr(multi_portfolio["total_value"], 2),
++        border=True,
++        chart_data=portfolio_value_spark,
++        chart_type="line",
++        icon=":material/account_balance_wallet:",
++    )
++    st.metric(
++        "Holdings",
++        f"{multi_portfolio['holding_count']}",
++        border=True,
++        icon=":material/pie_chart:",
++    )
++    st.metric(
++        "Seed total",
++        inr(PORTFOLIO_SNAPSHOT_TOTAL, 2),
++        border=True,
++        icon=":material/baseline:",
++    )
++    dod_delta = dod["delta"] if dod else multi_portfolio["delta_vs_snapshot"]
++    dod_pct = dod["delta_pct"] if dod else multi_portfolio["delta_vs_snapshot_pct"]
++    st.metric(
++        "Day-over-day" if dod else "Vs seed",
++        inr(dod_delta, 2),
++        delta=(f"{dod_pct:.2f}%" if dod_pct is not None else None),
++        border=True,
++        icon=":material/trending_up:",
++    )
++
++st.subheader("Kotak Multicap (research sleeve)")
+ with st.container(horizontal=True):
+     st.metric("Scheme code", SCHEME_CODE, border=True, icon=":material/tag:")
+     st.metric(
+         "Current NAV",
+         inr(current_nav, 4),
+         border=True,
+-        chart_data=nav_spark,
++        chart_data=nav_spark or None,
+         chart_type="line",
+         icon=":material/payments:",
+     )
+@@ -689,14 +823,14 @@
+         icon=":material/toll:",
+     )
+ 
+-st.subheader("Portfolio performance")
++st.subheader("Kotak performance (cost basis)")
+ with st.container(horizontal=True):
+     st.metric("Investment", inr(INVESTMENT, 4), border=True)
+     st.metric(
+         "Current value",
+         inr(portfolio["current_value"], 4),
+         border=True,
+-        chart_data=value_spark,
++        chart_data=value_spark or None,
+         chart_type="line",
+     )
+     st.metric(
+@@ -740,7 +874,36 @@
+ 
+ with tab_overview:
+     st.badge("Overview", color="blue", icon=":material/dashboard:")
+-    st.subheader("Investment details")
++    st.subheader("All holdings")
++    st.dataframe(
++        holdings_df,
++        column_config={
++            "Holding": st.column_config.TextColumn("Holding"),
++            "Category": st.column_config.TextColumn("Category"),
++            "Units": st.column_config.NumberColumn("Units", format="%.4f"),
++            "NAV": st.column_config.NumberColumn("NAV", format="₹%.4f"),
++            "Value": st.column_config.NumberColumn("Value", format="₹%.2f"),
++            "Allocation": st.column_config.NumberColumn("Allocation", format="%.2f%%"),
++            "NAV source": st.column_config.TextColumn("NAV source"),
++        },
++        hide_index=True,
++        width="stretch",
++    )
++    st.caption(
++        f"Total {inr(multi_portfolio['total_value'], 2)} · "
++        f"seed {HOLDINGS_AS_OF.isoformat()} = {inr(PORTFOLIO_SNAPSHOT_TOTAL, 2)}. "
++        "NPS/ULIP marked `manual_nav` (no public API)."
++    )
++
++    if dod:
++        st.subheader("Day-over-day change")
++        st.caption(
++            f"{dod['previous_as_of']} → {dod['current_as_of']}: "
++            f"{inr(dod['delta'], 2)} ({dod['delta_pct']}%)"
++        )
++        st.dataframe(pd.DataFrame(dod["holdings"]), hide_index=True, width="stretch")
++
++    st.subheader("Kotak investment details")
+     investment_df = pd.DataFrame(
+         {
+             "Metric": [
+@@ -765,58 +928,78 @@
+     )
+     st.dataframe(investment_df, hide_index=True, width="stretch")
+ 
+-    st.subheader("Key statistics")
+-    with st.container(horizontal=True):
+-        st.metric("CAGR", f"{features['cagr_pct']:.2f}%", border=True)
+-        st.metric(
+-            "Max drawdown",
+-            f"{features['max_drawdown_pct']:.2f}%",
+-            border=True,
+-        )
+-        st.metric(
+-            "1Y return",
+-            (
+-                f"{features['return_1y_pct']:.2f}%"
+-                if features["return_1y_pct"] is not None
+-                else "—"
+-            ),
+-            border=True,
+-        )
+-        st.metric(
+-            "Vol (63d ann.)",
+-            (
+-                f"{features['vol_63d_ann_pct']:.2f}%"
+-                if features["vol_63d_ann_pct"] is not None
+-                else "—"
+-            ),
+-            border=True,
+-        )
++    st.subheader("Kotak key statistics")
++    if features is None:
++        st.info("Load Kotak NAV history to see CAGR / drawdown / volatility.")
++    else:
++        with st.container(horizontal=True):
++            st.metric("CAGR", f"{features['cagr_pct']:.2f}%", border=True)
++            st.metric(
++                "Max drawdown",
++                f"{features['max_drawdown_pct']:.2f}%",
++                border=True,
++            )
++            st.metric(
++                "1Y return",
++                (
++                    f"{features['return_1y_pct']:.2f}%"
++                    if features["return_1y_pct"] is not None
++                    else "—"
++                ),
++                border=True,
++            )
++            st.metric(
++                "Vol (63d ann.)",
++                (
++                    f"{features['vol_63d_ann_pct']:.2f}%"
++                    if features["vol_63d_ann_pct"] is not None
++                    else "—"
++                ),
++                border=True,
++            )
+ 
+-    with st.expander("NAV history data"):
+-        st.dataframe(
+-            nav_df,
+-            column_config={
+-                "Date": st.column_config.DatetimeColumn("Date", format="DD-MMM-YYYY"),
+-                "NAV": st.column_config.NumberColumn("NAV", format="₹%.4f"),
+-            },
+-            hide_index=True,
+-            width="stretch",
+-        )
++    with st.expander("Kotak NAV history data"):
++        if nav_df is None:
++            st.info("No Kotak NAV rows loaded.")
++        else:
++            st.dataframe(
++                nav_df,
++                column_config={
++                    "Date": st.column_config.DatetimeColumn("Date", format="DD-MMM-YYYY"),
++                    "NAV": st.column_config.NumberColumn("NAV", format="₹%.4f"),
++                },
++                hide_index=True,
++                width="stretch",
++            )
+ 
+ with tab_charts:
+     st.badge("Charts", color="blue", icon=":material/show_chart:")
+     c1, c2 = st.columns(2)
+     with c1:
+         with st.container(border=True):
+-            st.subheader("NAV history")
+-            st.altair_chart(
+-                nav_history_chart(nav_df),
+-                width="stretch",
+-                theme=None,
+-            )
++            st.subheader("Kotak NAV history")
++            if nav_df is None:
++                st.info("Load Kotak NAV to chart history.")
++            else:
++                st.altair_chart(
++                    nav_history_chart(nav_df),
++                    width="stretch",
++                    theme=None,
++                )
+     with c2:
+         with st.container(border=True):
+-            st.subheader("Portfolio value history")
++            st.subheader("Total portfolio value (snapshots)")
++            if snapshot_history.empty:
++                st.info("No snapshots yet — seed should create 2026-09-06.")
++            else:
++                st.altair_chart(
++                    portfolio_value_chart(snapshot_history),
++                    width="stretch",
++                    theme=None,
++                )
++    if portfolio_history is not None:
++        with st.container(border=True):
++            st.subheader("Kotak sleeve value history")
+             st.altair_chart(
+                 portfolio_value_chart(portfolio_history),
+                 width="stretch",
+@@ -825,6 +1008,31 @@
+ 
+ with tab_alloc:
+     st.badge("Allocations", color="orange", icon=":material/pie_chart:")
++    st.subheader("Portfolio allocation by holding")
++    alloc_chart_df = holdings_df.rename(columns={"Holding": "Holding"})[
++        ["Holding", "Allocation"]
++    ]
++    a0, a0b = st.columns(2)
++    with a0:
++        with st.container(border=True):
++            st.dataframe(
++                holdings_df[["Holding", "Category", "Value", "Allocation"]],
++                column_config={
++                    "Value": st.column_config.NumberColumn(format="₹%.2f"),
++                    "Allocation": st.column_config.NumberColumn(format="%.2f%%"),
++                },
++                hide_index=True,
++                width="stretch",
++            )
++    with a0b:
++        with st.container(border=True):
++            st.altair_chart(
++                allocation_bar_chart(alloc_chart_df, "Holding"),
++                width="stretch",
++                theme=None,
++            )
++
++    st.subheader("Kotak sleeve — internal allocations")
+     asset_df = get_asset_dataframe()
+     sector_df = get_sector_dataframe()
+     sector_display = sector_df.copy()
+@@ -882,8 +1090,8 @@
+                 theme=None,
+             )
+     st.caption(
+-        "Sector allocation is a percentage of the fund's equity portfolio. "
+-        f"Equity itself is {EQUITY_ALLOCATION:.2f}% of the fund."
++        "Kotak sector allocation is a percentage of that fund's equity portfolio. "
++        f"Equity itself is {EQUITY_ALLOCATION:.2f}% of Kotak Multicap."
+     )
+ 
+ with tab_agents:
+@@ -893,10 +1101,11 @@
+ 
+ with tab_forecast:
+     st.badge("Forecast", color="violet", icon=":material/psychology:")
+-    st.subheader("NAV scenario forecast")
++    st.subheader("Kotak NAV scenario forecast")
+     st.caption(
+-        "Uses your local OpenAI-compatible endpoint. "
+-        "Recommended model: Mistral-Nemo-Instruct-2407 (~12B)."
++        "Kotak sleeve uses the existing LLM / statistical path. "
++        "Portfolio projection below keeps NPS/ULIP flat at last NAV. "
++        "Basic multi-fund overview does not require llama servers."
+     )
+ 
+     if st.session_state.forecast_error:
+@@ -918,9 +1127,33 @@
+     with sub_scenarios:
+         if forecast is None:
+             st.info(
+-                "No forecast yet. Set the endpoint in the sidebar and click "
+-                "**Ask Manager: run now** or **Run forecast only**."
++                "No Kotak NAV forecast yet. Set the endpoint in the sidebar and click "
++                "**Ask Manager: run now** or **Run forecast only** "
++                "(optional — overview works without it)."
++            )
++            # Lightweight portfolio projection without LLM
++            proj = project_portfolio_scenarios(multi_portfolio)
++            st.subheader("Simple portfolio projection (no LLM)")
++            st.caption(
++                "Illustrative only: mild bear/base/bull on non-manual sleeves; "
++                "NPS/ULIP flat. Not investment advice."
+             )
++            pcols = st.columns(3)
++            colors = {"bear": "red", "base": "yellow", "bull": "green"}
++            for col, sname in zip(pcols, ("bear", "base", "bull")):
++                pdata = proj.get(sname) or {}
++                with col:
++                    with st.container(border=True):
++                        st.badge(sname.capitalize(), color=colors[sname])
++                        st.metric(
++                            "Horizon portfolio",
++                            inr(pdata.get("total_value") or 0.0, 2),
++                            delta=(
++                                f"{pdata['delta_pct']:.2f}%"
++                                if pdata.get("delta_pct") is not None
++                                else None
++                            ),
++                        )
+         else:
+             source = forecast.get("source", "unknown")
+             source_color = "green" if source == "llm" else "orange"
+@@ -940,11 +1173,14 @@
+                 "bull": "green",
+             }
+ 
+-            st.altair_chart(
+-                forecast_overlay_chart(nav_df, forecast_df),
+-                width="stretch",
+-                theme=None,
+-            )
++            if nav_df is None:
++                st.warning("Kotak NAV history missing — showing forecast paths only.")
++            else:
++                st.altair_chart(
++                    forecast_overlay_chart(nav_df, forecast_df),
++                    width="stretch",
++                    theme=None,
++                )
+ 
+             cols = st.columns(3)
+             for col, name in zip(cols, ("bear", "base", "bull")):
+@@ -972,6 +1208,40 @@
+ 
+             st.caption(forecast.get("disclaimer") or "")
+ 
++            # Portfolio-level projection: Kotak path + flat manual holdings
++            scenario_end_navs = {}
++            for sname in ("bear", "base", "bull"):
++                payload = scenarios.get(sname) or {}
++                path = payload.get("nav_path") or []
++                if path:
++                    scenario_end_navs[sname] = float(path[-1]["nav"])
++            if scenario_end_navs:
++                proj = project_portfolio_scenarios(
++                    multi_portfolio,
++                    scenario_end_navs=scenario_end_navs,
++                )
++                st.subheader("Total portfolio projection")
++                st.caption(
++                    "Kotak follows the scenario NAV path; NPS/ULIP held flat "
++                    "(manual_nav, no public API)."
++                )
++                pcols = st.columns(3)
++                for col, sname in zip(pcols, ("bear", "base", "bull")):
++                    pdata = proj.get(sname) or {}
++                    with col:
++                        with st.container(border=True):
++                            st.badge(sname.capitalize(), color=scenario_colors[sname])
++                            st.metric(
++                                "Horizon portfolio",
++                                inr(pdata.get("total_value") or 0.0, 2),
++                                delta=(
++                                    f"{pdata['delta_pct']:.2f}%"
++                                    if pdata.get("delta_pct") is not None
++                                    else None
++                                ),
++                            )
++                            st.caption(pdata.get("rationale") or "")
++
+     with sub_agents:
+         st.info(
+             "Full analyst status, raw file paths, and memory hits are on the "
+@@ -1036,9 +1306,12 @@
+                 width="stretch",
+             )
+             st.subheader("Features sent to the model")
+-            display_features = {
+-                k: v for k, v in features.items() if k != "recent_series"
+-            }
+-            st.json(display_features)
++            if features is None:
++                st.info("No Kotak features loaded.")
++            else:
++                display_features = {
++                    k: v for k, v in features.items() if k != "recent_series"
++                }
++                st.json(display_features)
+ 
+-st.caption("Kotak Multicap Fund — interactive portfolio tracker")
++st.caption("RevOps multi-fund tracker — research only, not investment advice")
+diff --git
+--- a/data/snapshots/2026-09-06.json	1970-01-01 00:00:00.000000000 +0000
++++ b/data/snapshots/2026-09-06.json	2026-09-06 17:09:53.327486582 +0000
+@@ -0,0 +1,65 @@
++{
++  "as_of": "2026-09-06",
++  "created_at": "2026-09-06T00:00:00+05:30",
++  "source": "seed",
++  "currency": "INR",
++  "total_value": 286496.31,
++  "holdings": [
++    {
++      "id": "icici_nps_e",
++      "name": "ICICI Prudential Pension Fund \u2014 Scheme E",
++      "short_name": "NPS Scheme E",
++      "category": "NPS",
++      "units": 976.306,
++      "nav": 74.2416,
++      "value": 72482.51,
++      "nav_source": "manual_nav",
++      "scheme_code": null
++    },
++    {
++      "id": "icici_nps_c",
++      "name": "ICICI Prudential Pension Fund \u2014 Scheme C",
++      "short_name": "NPS Scheme C",
++      "category": "NPS",
++      "units": 911.669,
++      "nav": 46.5038,
++      "value": 42396.07,
++      "nav_source": "manual_nav",
++      "scheme_code": null
++    },
++    {
++      "id": "icici_nps_g",
++      "name": "ICICI Prudential Pension Fund \u2014 Scheme G",
++      "short_name": "NPS Scheme G",
++      "category": "NPS",
++      "units": 731.0734,
++      "nav": 38.6797,
++      "value": 28277.69,
++      "nav_source": "manual_nav",
++      "scheme_code": null
++    },
++    {
++      "id": "kotak_multicap",
++      "name": "Kotak Multicap Fund - Regular Plan - Growth",
++      "short_name": "Kotak Multicap",
++      "category": "Mutual Fund",
++      "units": 4926.833,
++      "nav": 20.18,
++      "value": 99423.0,
++      "nav_source": "mfapi",
++      "scheme_code": "149182"
++    },
++    {
++      "id": "tata_ulip_mqi",
++      "name": "Tata ULIP MQI",
++      "short_name": "Tata ULIP MQI",
++      "category": "ULIP",
++      "units": 4737.5444,
++      "nav": 9.27,
++      "value": 43917.04,
++      "nav_source": "manual_nav",
++      "scheme_code": null
++    }
++  ],
++  "notes": "Baseline seed snapshot (Asia/Kolkata). NPS/ULIP use manual NAV; Kotak scheme 149182 refreshes via mfapi."
++}
+diff --git
+--- a/utils/__init__.py	2026-08-24 11:50:35.000000000 +0000
++++ b/utils/__init__.py	2026-09-06 17:13:26.582327966 +0000
+@@ -1,4 +1,4 @@
+-"""Shared business logic for the Kotak Multicap portfolio dashboard."""
++"""Shared business logic for the RevOps multi-fund portfolio dashboard."""
+ 
+ from utils.config import (
+     ASSET_DATA,
+@@ -7,11 +7,15 @@
+     EQUITY_ALLOCATION,
+     FUND_INCEPTION_DATE,
+     FUND_NAME,
++    HOLDINGS,
++    HOLDINGS_AS_OF,
+     INVESTMENT,
+     OTHER_ALLOCATION,
++    PORTFOLIO_SNAPSHOT_TOTAL,
+     PURCHASE_NAV,
+     SCHEME_CODE,
+     SECTOR_DATA,
++    SNAPSHOTS_DIR,
+     UNITS_HELD,
+ )
+ from utils.features import (
+@@ -22,18 +26,32 @@
+ from utils.llm import forecast_nav
+ from utils.market import fetch_nifty_context
+ from utils.nav import (
++    fetch_live_navs_for_holdings,
+     fetch_nav_history,
+     filter_nav_by_dates,
+     get_date_range,
++    latest_nav_for_scheme,
+     normalize_nav_dataframe,
+     parse_nav_response,
+ )
+ from utils.portfolio import (
+     build_portfolio_history,
++    calculate_multi_fund_portfolio,
+     calculate_portfolio,
+     get_asset_dataframe,
+     get_sector_dataframe,
++    holdings_allocation_dataframe,
+     inr,
++    project_portfolio_scenarios,
++)
++from utils.snapshots import (
++    build_snapshot_from_holdings,
++    day_over_day_change,
++    list_snapshots,
++    load_snapshot,
++    save_snapshot,
++    seed_baseline_snapshot,
++    snapshots_to_history_df,
+ )
+ 
+ __all__ = [
+@@ -43,15 +61,23 @@
+     "EQUITY_ALLOCATION",
+     "FUND_INCEPTION_DATE",
+     "FUND_NAME",
++    "HOLDINGS",
++    "HOLDINGS_AS_OF",
+     "INVESTMENT",
+     "OTHER_ALLOCATION",
++    "PORTFOLIO_SNAPSHOT_TOTAL",
+     "PURCHASE_NAV",
+     "SCHEME_CODE",
+     "SECTOR_DATA",
++    "SNAPSHOTS_DIR",
+     "UNITS_HELD",
+     "build_nav_features",
+     "build_portfolio_history",
++    "build_snapshot_from_holdings",
++    "calculate_multi_fund_portfolio",
+     "calculate_portfolio",
++    "day_over_day_change",
++    "fetch_live_navs_for_holdings",
+     "fetch_nav_history",
+     "fetch_nifty_context",
+     "filter_nav_by_dates",
+@@ -60,8 +86,16 @@
+     "get_asset_dataframe",
+     "get_date_range",
+     "get_sector_dataframe",
++    "holdings_allocation_dataframe",
+     "inr",
++    "latest_nav_for_scheme",
++    "list_snapshots",
++    "load_snapshot",
+     "normalize_nav_dataframe",
+     "parse_nav_response",
++    "project_portfolio_scenarios",
++    "save_snapshot",
++    "seed_baseline_snapshot",
++    "snapshots_to_history_df",
+     "statistical_baseline_forecast",
+ ]
+diff --git
+--- a/utils/config.py	2026-08-24 11:50:35.000000000 +0000
++++ b/utils/config.py	2026-09-06 17:08:50.011866562 +0000
+@@ -1,17 +1,100 @@
+ """Fund configuration and static allocation data."""
+ 
++from __future__ import annotations
++
+ from datetime import date
+ from pathlib import Path
++from typing import Any
+ 
++# ---------------------------------------------------------------------------
++# Multi-fund holdings snapshot (as of 2026-09-06, Asia/Kolkata)
++# ---------------------------------------------------------------------------
++HOLDINGS_AS_OF = date(2026, 9, 6)
++
++HOLDINGS: list[dict[str, Any]] = [
++    {
++        "id": "icici_nps_e",
++        "name": "ICICI Prudential Pension Fund — Scheme E",
++        "short_name": "NPS Scheme E",
++        "category": "NPS",
++        "units": 976.3060,
++        "snapshot_nav": 74.2416,
++        "snapshot_value": 72482.51,
++        "as_of": HOLDINGS_AS_OF.isoformat(),
++        "nav_source": "manual_nav",
++        "scheme_code": None,
++        "notes": "NPS — no public mfapi NAV; update manually in snapshots.",
++    },
++    {
++        "id": "icici_nps_c",
++        "name": "ICICI Prudential Pension Fund — Scheme C",
++        "short_name": "NPS Scheme C",
++        "category": "NPS",
++        "units": 911.6690,
++        "snapshot_nav": 46.5038,
++        "snapshot_value": 42396.07,
++        "as_of": HOLDINGS_AS_OF.isoformat(),
++        "nav_source": "manual_nav",
++        "scheme_code": None,
++        "notes": "NPS — no public mfapi NAV; update manually in snapshots.",
++    },
++    {
++        "id": "icici_nps_g",
++        "name": "ICICI Prudential Pension Fund — Scheme G",
++        "short_name": "NPS Scheme G",
++        "category": "NPS",
++        "units": 731.0734,
++        "snapshot_nav": 38.6797,
++        "snapshot_value": 28277.69,
++        "as_of": HOLDINGS_AS_OF.isoformat(),
++        "nav_source": "manual_nav",
++        "scheme_code": None,
++        "notes": "NPS — no public mfapi NAV; update manually in snapshots.",
++    },
++    {
++        "id": "kotak_multicap",
++        "name": "Kotak Multicap Fund - Regular Plan - Growth",
++        "short_name": "Kotak Multicap",
++        "category": "Mutual Fund",
++        "units": 4926.833,
++        "snapshot_nav": 20.18,
++        "snapshot_value": 99423.0,
++        "as_of": HOLDINGS_AS_OF.isoformat(),
++        "nav_source": "mfapi",
++        "scheme_code": "149182",
++        "notes": "Live NAV via mfapi.in (AMFI-backed).",
++    },
++    {
++        "id": "tata_ulip_mqi",
++        "name": "Tata ULIP MQI",
++        "short_name": "Tata ULIP MQI",
++        "category": "ULIP",
++        "units": 4737.5444,
++        "snapshot_nav": 9.27,
++        "snapshot_value": 43917.04,
++        "as_of": HOLDINGS_AS_OF.isoformat(),
++        "nav_source": "manual_nav",
++        "scheme_code": None,
++        "notes": "ULIP — no public mfapi NAV; update manually in snapshots.",
++    },
++]
++
++# Snapshot total ≈ ₹286,496.31 (sum of snapshot_value fields).
++PORTFOLIO_SNAPSHOT_TOTAL = round(sum(h["snapshot_value"] for h in HOLDINGS), 2)
++
++# ---------------------------------------------------------------------------
++# Backward-compatible Kotak aliases (agents / monitor / research pipeline)
++# ---------------------------------------------------------------------------
+ SCHEME_CODE = "149182"
+ FUND_NAME = "Kotak Multicap Fund - Regular Plan - Growth"
+ 
+ # Official allotment / inception (Kotak / AMFI). First mfapi NAV is 2021-10-06.
+ FUND_INCEPTION_DATE = date(2021, 9, 29)
+ 
++# Historical cost basis for Kotak (agents / ROI helpers). Units match snapshot.
+ INVESTMENT = 99995.00
+ PURCHASE_NAV = 20.30
+-UNITS_HELD = INVESTMENT / PURCHASE_NAV
++UNITS_HELD = 4926.833  # snapshot units as of 2026-09-06
+ 
+ EQUITY_ALLOCATION = 99.25
+ OTHER_ALLOCATION = 0.75
+@@ -52,6 +135,7 @@
+ CHROMA_DATA_DIR = DATA_DIR / "chroma_store"
+ AGENT_RUNS_DIR = DATA_DIR / "agent_runs"
+ RAG_DATA_DIR = DATA_DIR / "rag"
++SNAPSHOTS_DIR = DATA_DIR / "snapshots"
+ 
+ # Proxies used by Fundamentals / Technical analysts (yfinance).
+ FUNDAMENTAL_PROXY_SYMBOLS = {
+@@ -66,3 +150,18 @@
+     "bank_nifty": "^NSEBANK",
+     "nifty_it": "^CNXIT",
+ }
++
++
++def get_holding(holding_id: str) -> dict[str, Any]:
++    for holding in HOLDINGS:
++        if holding["id"] == holding_id:
++            return holding
++    raise KeyError(f"Unknown holding id: {holding_id}")
++
++
++def mfapi_holdings() -> list[dict[str, Any]]:
++    return [h for h in HOLDINGS if h.get("nav_source") == "mfapi" and h.get("scheme_code")]
++
++
++def manual_nav_holdings() -> list[dict[str, Any]]:
++    return [h for h in HOLDINGS if h.get("nav_source") == "manual_nav"]
+diff --git
+--- a/utils/nav.py	2026-08-24 11:50:35.000000000 +0000
++++ b/utils/nav.py	2026-09-06 17:09:42.115552499 +0000
+@@ -208,3 +208,38 @@
+         .sort_values("Date")
+         .reset_index(drop=True)
+     )
++
++
++def latest_nav_for_scheme(
++    scheme_code: str = SCHEME_CODE,
++    *,
++    timeout: int = 30,
++) -> tuple[float, pd.Timestamp]:
++    """Return (latest_nav, date) for an mfapi scheme code."""
++    nav_df = fetch_nav_history(scheme_code=scheme_code, timeout=timeout)
++    latest = nav_df.iloc[-1]
++    return float(latest["NAV"]), pd.Timestamp(latest["Date"])
++
++
++def fetch_live_navs_for_holdings(
++    holdings: list | None = None,
++    *,
++    timeout: int = 30,
++) -> dict[str, float]:
++    """
++    Fetch live NAVs for holdings with nav_source=mfapi.
++
++    Returns {holding_id: nav}. Manual holdings are omitted (caller uses snapshot).
++    """
++    from utils.config import HOLDINGS as DEFAULT_HOLDINGS
++
++    live: dict[str, float] = {}
++    for holding in holdings or DEFAULT_HOLDINGS:
++        if holding.get("nav_source") != "mfapi":
++            continue
++        code = holding.get("scheme_code")
++        if not code:
++            continue
++        nav, _ = latest_nav_for_scheme(str(code), timeout=timeout)
++        live[holding["id"]] = nav
++    return live
+diff --git
+--- a/utils/portfolio.py	2026-08-24 11:50:35.000000000 +0000
++++ b/utils/portfolio.py	2026-09-06 17:09:35.855589540 +0000
+@@ -1,18 +1,27 @@
+-"""Portfolio math and allocation helpers."""
++"""Portfolio math and allocation helpers (multi-fund)."""
+ 
+ from __future__ import annotations
+ 
++from typing import Any
++
+ import pandas as pd
+ 
+ from utils.config import (
+     ASSET_DATA,
++    HOLDINGS,
+     INVESTMENT,
+     SECTOR_DATA,
+     UNITS_HELD,
+ )
+ 
+ 
++def inr(value: float, decimals: int = 4) -> str:
++    """Format currency with configurable decimals (default 4 for NAV accuracy)."""
++    return f"₹{value:,.{decimals}f}"
++
++
+ def calculate_portfolio(current_nav: float) -> dict[str, float]:
++    """Kotak-only valuation (backward compatible for agents / forecast)."""
+     current_value = round(UNITS_HELD * current_nav, 4)
+     profit_loss = round(current_value - INVESTMENT, 4)
+     roi = (current_value / INVESTMENT - 1) * 100
+@@ -25,9 +34,108 @@
+     }
+ 
+ 
+-def inr(value: float, decimals: int = 4) -> str:
+-    """Format currency with configurable decimals (default 4 for NAV accuracy)."""
+-    return f"₹{value:,.{decimals}f}"
++def resolve_holding_nav(
++    holding: dict[str, Any],
++    *,
++    live_navs: dict[str, float] | None = None,
++    snapshot_navs: dict[str, float] | None = None,
++) -> float:
++    """Pick live → latest snapshot → config snapshot NAV for a holding."""
++    hid = holding["id"]
++    if live_navs and hid in live_navs and live_navs[hid] is not None:
++        return float(live_navs[hid])
++    if snapshot_navs and hid in snapshot_navs and snapshot_navs[hid] is not None:
++        return float(snapshot_navs[hid])
++    return float(holding["snapshot_nav"])
++
++
++def value_holding(
++    holding: dict[str, Any],
++    nav: float | None = None,
++    *,
++    live_navs: dict[str, float] | None = None,
++    snapshot_navs: dict[str, float] | None = None,
++) -> dict[str, Any]:
++    """Value one holding: units * NAV."""
++    resolved = (
++        float(nav)
++        if nav is not None
++        else resolve_holding_nav(
++            holding, live_navs=live_navs, snapshot_navs=snapshot_navs
++        )
++    )
++    units = float(holding["units"])
++    value = round(units * resolved, 2)
++    return {
++        "id": holding["id"],
++        "name": holding["name"],
++        "short_name": holding.get("short_name") or holding["name"],
++        "category": holding.get("category"),
++        "units": units,
++        "nav": round(resolved, 4),
++        "value": value,
++        "nav_source": holding.get("nav_source"),
++        "scheme_code": holding.get("scheme_code"),
++        "as_of": holding.get("as_of"),
++        "snapshot_nav": float(holding["snapshot_nav"]),
++        "snapshot_value": float(holding["snapshot_value"]),
++    }
++
++
++def calculate_multi_fund_portfolio(
++    holdings: list[dict[str, Any]] | None = None,
++    *,
++    live_navs: dict[str, float] | None = None,
++    snapshot_navs: dict[str, float] | None = None,
++) -> dict[str, Any]:
++    """
++    Value all holdings and return totals + allocation weights.
++
++    live_navs: optional {holding_id: nav} from mfapi (Kotak).
++    snapshot_navs: optional {holding_id: nav} from latest daily snapshot.
++    """
++    rows = [
++        value_holding(h, live_navs=live_navs, snapshot_navs=snapshot_navs)
++        for h in (holdings or HOLDINGS)
++    ]
++    total = round(sum(r["value"] for r in rows), 2)
++    for row in rows:
++        row["allocation_pct"] = (
++            round((row["value"] / total) * 100.0, 4) if total else 0.0
++        )
++    snapshot_total = round(
++        sum(float(h["snapshot_value"]) for h in (holdings or HOLDINGS)), 2
++    )
++    delta_vs_snapshot = round(total - snapshot_total, 2)
++    delta_pct = (
++        round((delta_vs_snapshot / snapshot_total) * 100.0, 4) if snapshot_total else None
++    )
++    return {
++        "holdings": rows,
++        "total_value": total,
++        "snapshot_total": snapshot_total,
++        "delta_vs_snapshot": delta_vs_snapshot,
++        "delta_vs_snapshot_pct": delta_pct,
++        "holding_count": len(rows),
++    }
++
++
++def holdings_allocation_dataframe(portfolio: dict[str, Any]) -> pd.DataFrame:
++    rows = portfolio.get("holdings") or []
++    return pd.DataFrame(
++        [
++            {
++                "Holding": r.get("short_name") or r["name"],
++                "Category": r.get("category"),
++                "Units": r["units"],
++                "NAV": r["nav"],
++                "Value": r["value"],
++                "Allocation": r.get("allocation_pct", 0.0),
++                "NAV source": r.get("nav_source"),
++            }
++            for r in rows
++        ]
++    )
+ 
+ 
+ def get_sector_dataframe() -> pd.DataFrame:
+@@ -39,7 +147,75 @@
+ 
+ 
+ def build_portfolio_history(nav_df: pd.DataFrame) -> pd.DataFrame:
+-    """Attach portfolio value series to a normalized NAV DataFrame."""
++    """Attach Kotak-only portfolio value series to a normalized NAV DataFrame."""
+     history = nav_df.copy()
+     history["Portfolio Value"] = (history["NAV"] * UNITS_HELD).round(4)
+     return history
++
++
++def project_portfolio_scenarios(
++    portfolio: dict[str, Any],
++    *,
++    kotak_id: str = "kotak_multicap",
++    scenario_end_navs: dict[str, float] | None = None,
++    flat_growth_pct: dict[str, float] | None = None,
++) -> dict[str, Any]:
++    """
++    Simple portfolio-level bull/base/bear projection.
++
++    - Kotak: uses scenario end NAVs (from LLM/statistical forecast) when provided.
++    - Others: flat (0%) by default for manual_nav holdings.
++    """
++    holdings = portfolio.get("holdings") or []
++    scenarios = flat_growth_pct or {"bear": -0.03, "base": 0.01, "bull": 0.05}
++    end_navs = scenario_end_navs or {}
++    out: dict[str, Any] = {}
++    current_total = float(portfolio.get("total_value") or 0.0)
++
++    for name, default_pct in scenarios.items():
++        parts = []
++        total = 0.0
++        for row in holdings:
++            if row["id"] == kotak_id and name in end_navs:
++                nav = float(end_navs[name])
++                value = round(float(row["units"]) * nav, 2)
++                parts.append(
++                    {
++                        "id": row["id"],
++                        "name": row.get("short_name") or row["name"],
++                        "value": value,
++                        "nav": round(nav, 4),
++                        "method": "kotak_nav_path",
++                    }
++                )
++            else:
++                growth = 0.0 if row.get("nav_source") == "manual_nav" else default_pct
++                if row.get("nav_source") == "manual_nav":
++                    growth = 0.0
++                value = round(float(row["value"]) * (1.0 + growth), 2)
++                parts.append(
++                    {
++                        "id": row["id"],
++                        "name": row.get("short_name") or row["name"],
++                        "value": value,
++                        "nav": row["nav"],
++                        "method": "flat" if growth == 0.0 else "statistical",
++                    }
++                )
++            total += parts[-1]["value"]
++        total = round(total, 2)
++        delta_pct = (
++            round((total / current_total - 1.0) * 100.0, 4) if current_total else None
++        )
++        out[name] = {
++            "total_value": total,
++            "delta_pct": delta_pct,
++            "holdings": parts,
++            "rationale": (
++                "Kotak follows NAV scenario path; NPS/ULIP held flat at last NAV "
++                "(no public API)."
++                if name in end_navs
++                else "Portfolio statistical growth; manual NAV holdings held flat."
++            ),
++        }
++    return out
+diff --git
+--- a/utils/snapshots.py	1970-01-01 00:00:00.000000000 +0000
++++ b/utils/snapshots.py	2026-09-06 17:09:21.603674572 +0000
+@@ -0,0 +1,237 @@
++"""Daily portfolio snapshot persistence (JSON per day under data/snapshots/)."""
++
++from __future__ import annotations
++
++import json
++from datetime import date, datetime, timezone
++from pathlib import Path
++from typing import Any
++
++from utils.config import HOLDINGS, HOLDINGS_AS_OF, SNAPSHOTS_DIR
++
++
++def ensure_snapshots_dir(path: Path | None = None) -> Path:
++    root = path or SNAPSHOTS_DIR
++    root.mkdir(parents=True, exist_ok=True)
++    return root
++
++
++def snapshot_path(as_of: date | str, path: Path | None = None) -> Path:
++    root = ensure_snapshots_dir(path)
++    if isinstance(as_of, date):
++        day = as_of.isoformat()
++    else:
++        day = str(as_of)[:10]
++    return root / f"{day}.json"
++
++
++def build_snapshot_from_holdings(
++    holdings: list[dict[str, Any]] | None = None,
++    *,
++    as_of: date | None = None,
++    nav_overrides: dict[str, float] | None = None,
++    source: str = "config",
++) -> dict[str, Any]:
++    """
++    Build a snapshot payload from HOLDINGS (optionally overriding NAVs).
++
++    Value for each holding = units * nav (rounded to 2 decimals for INR).
++    """
++    day = as_of or HOLDINGS_AS_OF
++    rows: list[dict[str, Any]] = []
++    overrides = nav_overrides or {}
++    for holding in holdings or HOLDINGS:
++        hid = holding["id"]
++        units = float(holding["units"])
++        if hid in overrides:
++            nav = float(overrides[hid])
++        else:
++            nav = float(holding.get("snapshot_nav") or holding.get("nav") or 0.0)
++        value = round(units * nav, 2)
++        rows.append(
++            {
++                "id": hid,
++                "name": holding["name"],
++                "short_name": holding.get("short_name") or holding["name"],
++                "category": holding.get("category"),
++                "units": units,
++                "nav": round(nav, 4),
++                "value": value,
++                "nav_source": holding.get("nav_source"),
++                "scheme_code": holding.get("scheme_code"),
++            }
++        )
++    total = round(sum(r["value"] for r in rows), 2)
++    return {
++        "as_of": day.isoformat() if isinstance(day, date) else str(day)[:10],
++        "created_at": datetime.now(timezone.utc).isoformat(),
++        "source": source,
++        "currency": "INR",
++        "total_value": total,
++        "holdings": rows,
++    }
++
++
++def save_snapshot(
++    snapshot: dict[str, Any],
++    path: Path | None = None,
++    *,
++    overwrite: bool = True,
++) -> Path:
++    """Persist a snapshot as data/snapshots/YYYY-MM-DD.json."""
++    as_of = snapshot.get("as_of")
++    if not as_of:
++        raise ValueError("snapshot must include as_of (YYYY-MM-DD).")
++    dest = snapshot_path(as_of, path)
++    if dest.exists() and not overwrite:
++        return dest
++    ensure_snapshots_dir(dest.parent)
++    dest.write_text(json.dumps(snapshot, indent=2, sort_keys=False) + "\n", encoding="utf-8")
++    return dest
++
++
++def load_snapshot(as_of: date | str, path: Path | None = None) -> dict[str, Any] | None:
++    dest = snapshot_path(as_of, path)
++    if not dest.exists():
++        return None
++    return json.loads(dest.read_text(encoding="utf-8"))
++
++
++def list_snapshots(path: Path | None = None) -> list[dict[str, Any]]:
++    """Return snapshots sorted by as_of ascending (oldest first)."""
++    root = ensure_snapshots_dir(path)
++    out: list[dict[str, Any]] = []
++    for file in sorted(root.glob("*.json")):
++        try:
++            payload = json.loads(file.read_text(encoding="utf-8"))
++        except (json.JSONDecodeError, OSError):
++            continue
++        if "as_of" not in payload:
++            payload["as_of"] = file.stem
++        out.append(payload)
++    out.sort(key=lambda s: s.get("as_of") or "")
++    return out
++
++
++def latest_snapshot(path: Path | None = None) -> dict[str, Any] | None:
++    snaps = list_snapshots(path)
++    return snaps[-1] if snaps else None
++
++
++def day_over_day_change(
++    path: Path | None = None,
++    *,
++    as_of: date | str | None = None,
++) -> dict[str, Any] | None:
++    """
++    Compare the given (or latest) snapshot to the previous one.
++
++    Returns total delta + per-holding deltas, or None if < 2 snapshots.
++    """
++    snaps = list_snapshots(path)
++    if len(snaps) < 2:
++        return None
++
++    if as_of is None:
++        current = snaps[-1]
++        previous = snaps[-2]
++    else:
++        day = as_of.isoformat() if isinstance(as_of, date) else str(as_of)[:10]
++        idx = next((i for i, s in enumerate(snaps) if s.get("as_of") == day), None)
++        if idx is None or idx == 0:
++            return None
++        current = snaps[idx]
++        previous = snaps[idx - 1]
++
++    prev_by_id = {h["id"]: h for h in previous.get("holdings") or []}
++    holding_deltas: list[dict[str, Any]] = []
++    for row in current.get("holdings") or []:
++        prev = prev_by_id.get(row["id"])
++        prev_value = float(prev["value"]) if prev else None
++        curr_value = float(row["value"])
++        delta = None if prev_value is None else round(curr_value - prev_value, 2)
++        pct = None
++        if prev_value and prev_value != 0 and delta is not None:
++            pct = round((delta / prev_value) * 100.0, 4)
++        holding_deltas.append(
++            {
++                "id": row["id"],
++                "name": row.get("short_name") or row.get("name"),
++                "previous_value": prev_value,
++                "current_value": curr_value,
++                "delta": delta,
++                "delta_pct": pct,
++            }
++        )
++
++    prev_total = float(previous.get("total_value") or 0.0)
++    curr_total = float(current.get("total_value") or 0.0)
++    total_delta = round(curr_total - prev_total, 2)
++    total_pct = round((total_delta / prev_total) * 100.0, 4) if prev_total else None
++
++    return {
++        "previous_as_of": previous.get("as_of"),
++        "current_as_of": current.get("as_of"),
++        "previous_total": prev_total,
++        "current_total": curr_total,
++        "delta": total_delta,
++        "delta_pct": total_pct,
++        "holdings": holding_deltas,
++    }
++
++
++def seed_baseline_snapshot(
++    path: Path | None = None,
++    *,
++    overwrite: bool = False,
++) -> Path:
++    """Write the committed seed snapshot for HOLDINGS_AS_OF if missing."""
++    existing = load_snapshot(HOLDINGS_AS_OF, path)
++    if existing is not None and not overwrite:
++        return snapshot_path(HOLDINGS_AS_OF, path)
++    # Use exact config snapshot_value fields (not recomputed) for the seed.
++    rows = []
++    for holding in HOLDINGS:
++        rows.append(
++            {
++                "id": holding["id"],
++                "name": holding["name"],
++                "short_name": holding.get("short_name") or holding["name"],
++                "category": holding.get("category"),
++                "units": float(holding["units"]),
++                "nav": float(holding["snapshot_nav"]),
++                "value": float(holding["snapshot_value"]),
++                "nav_source": holding.get("nav_source"),
++                "scheme_code": holding.get("scheme_code"),
++            }
++        )
++    snapshot = {
++        "as_of": HOLDINGS_AS_OF.isoformat(),
++        "created_at": "2026-09-06T00:00:00+05:30",
++        "source": "seed",
++        "currency": "INR",
++        "total_value": round(sum(r["value"] for r in rows), 2),
++        "holdings": rows,
++        "notes": (
++            "Baseline seed snapshot (Asia/Kolkata). "
++            "NPS/ULIP use manual NAV; Kotak scheme 149182 refreshes via mfapi."
++        ),
++    }
++    return save_snapshot(snapshot, path, overwrite=True)
++
++
++def snapshots_to_history_df(path: Path | None = None):
++    """Return a pandas DataFrame of Date + Portfolio Value from snapshots."""
++    import pandas as pd
++
++    rows = []
++    for snap in list_snapshots(path):
++        rows.append(
++            {
++                "Date": pd.Timestamp(snap["as_of"]),
++                "Portfolio Value": float(snap.get("total_value") or 0.0),
++            }
++        )
++    if not rows:
++        return pd.DataFrame(columns=["Date", "Portfolio Value"])
++    return pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
+diff --git
+--- a/data/snapshots/.gitkeep	1970-01-01 00:00:00.000000000 +0000
++++ b/data/snapshots/.gitkeep	2026-09-06 17:13:00.000000000 +0000
+@@ -0,0 +1 @@
++

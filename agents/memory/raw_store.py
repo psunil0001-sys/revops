@@ -1,4 +1,4 @@
-"""Persist raw research payloads under data/raw/{run_id}/."""
+"""Persist raw research payloads under data/raw/{fund_id}/{run_id}/."""
 
 from __future__ import annotations
 
@@ -24,9 +24,17 @@ def _json_default(obj: Any) -> Any:
 class RawStore:
     """One folder per pipeline run; agents write JSON payloads by name."""
 
-    def __init__(self, run_id: str, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        *,
+        fund_id: str = "default",
+        root: Path | None = None,
+    ) -> None:
         self.run_id = run_id
-        self.root = Path(root or RAW_DATA_DIR) / run_id
+        self.fund_id = fund_id
+        base = Path(root or RAW_DATA_DIR) / fund_id
+        self.root = base / run_id
         self.root.mkdir(parents=True, exist_ok=True)
         self.paths: list[str] = []
 
@@ -35,14 +43,16 @@ class RawStore:
         cls,
         session: str,
         *,
+        fund_id: str = "default",
         root: Path | None = None,
     ) -> "RawStore":
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_id = f"{stamp}_{session}_{uuid4().hex[:8]}"
-        store = cls(run_id, root=root)
+        store = cls(run_id, fund_id=fund_id, root=root)
         store.write_meta(
             {
                 "run_id": run_id,
+                "fund_id": fund_id,
                 "session": session,
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "statuses": {},

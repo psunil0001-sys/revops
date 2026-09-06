@@ -11,7 +11,7 @@ from agents.fetchers.social import gather_social
 from agents.memory.raw_store import RawStore
 from agents.rag.hybrid import HybridRetriever
 from agents.rag.store import DocumentStore
-from utils.config import FUND_NAME, SECTOR_DATA
+from utils.funds import FundConfig
 
 
 def _score_texts(texts: list[str]) -> tuple[float, str]:
@@ -52,11 +52,12 @@ class SentimentAnalyst(BaseAgent):
         )
 
     def run(self, contract: TaskContract, **kwargs: Any) -> ResearchBrief:
+        fund: FundConfig = kwargs["fund"]
         raw_store: RawStore | None = kwargs.get("raw_store")
         queries = [
-            "Kotak Multicap",
-            "multicap mutual fund",
-            "Nifty India markets",
+            fund.name.split(" - ")[0][:40],
+            *fund.research_queries[:2],
+            "multicap India markets",
         ]
         posts, social_errors, social_raw = gather_social(queries)
 
@@ -88,10 +89,11 @@ class SentimentAnalyst(BaseAgent):
         self.retriever.refresh()
         all_hits: list[RagHit] = []
         seen: set[str] = set()
+        sector_bits = " ".join(list(fund.sectors.keys())[:3])
         for query in [
-            FUND_NAME,
-            "multicap mutual fund India outlook",
-            " ".join(SECTOR_DATA["Sector"][:3]),
+            fund.name,
+            "multicap outlook India",
+            sector_bits or "equity markets India",
         ]:
             for hit in self.retriever.search(query, top_k=4):
                 if hit.doc_id in seen:

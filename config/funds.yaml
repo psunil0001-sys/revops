@@ -1,0 +1,46 @@
+funds:
+  - id: kotak_multicap
+    name: Kotak Multicap Fund - Regular Plan - Growth
+    type: mutual_fund
+    scheme_code: "149182"
+    nav_source: mfapi
+    inception_date: "2021-09-29"
+    investment: 99995.00
+    purchase_nav: 20.30
+    equity_pct: 99.25
+    other_pct: 0.75
+    benchmark_symbol: "^NSEI"
+    sectors:
+      Financial: 30.75
+      Consumer Discretionary: 15.01
+      Industrials: 14.72
+      Communication Services: 8.55
+      Consumer Staples: 7.76
+      Other Equity: 22.46
+    research_queries:
+      - "Kotak Multicap Fund"
+      - "India multicap mutual fund SEBI"
+      - "RBI interest rate India markets"
+
+  - id: tata_aia_mmqi
+    name: Tata AIA Multicap Momentum Quality Index Fund
+    type: ulip
+    sfin: "ULIF 078 31/12/24 MQI 110"
+    nav_source: file
+    nav_file: data/nav/tata_aia_mmqi.csv
+    inception_date: "2025-01-01"
+    investment: 44741.01
+    purchase_nav: 9.3108
+    equity_pct: 98.71
+    other_pct: 1.29
+    benchmark_symbol: "^NSEI"
+    sectors:
+      Others: 28.05
+      Capital Goods: 15.16
+      Automobile: 14.95
+      Other Equity: 41.84
+    research_queries:
+      - "Tata AIA Multicap Momentum Quality"
+      - "Nifty 500 Multicap Momentum Quality 50"
+      - "IRDAI ULIP regulations"
+      - "Tata AIA life insurance ULIP"
