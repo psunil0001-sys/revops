@@ -22,7 +22,7 @@ Default funds:
 
 | Area | Capability |
 |------|------------|
-| **Multi-fund** | YAML-driven funds; Portfolio tab + one top-level tab per fund with isolated NAV / agents / forecast |
+| **Multi-fund** | YAML-driven funds; Portfolio tab + per-fund tabs; **ICICI NPS E/C/G share one combined dashboard tab** (`dashboard_group`) |
 | **Portfolio** | Combined allocation, day-over-day vs prior snapshot, **Save today's snapshot**; per-fund NAV / P&L / ROI / CAGR |
 | **Research** | Five analysts: Fundamentals, Sentiment, News, Technical, **Policy** |
 | **Memory** | Raw JSON under `data/raw/{fund_id}/`, Chroma with `fund_id` metadata |
@@ -33,7 +33,7 @@ Default funds:
 
 ## Funds input file
 
-Holdings and research hints live in [`config/funds.yaml`](config/funds.yaml). Loader: [`utils/funds.py`](utils/funds.py) (`FundConfig`, `load_funds()`, `units = investment / purchase_nav`).
+Holdings and research hints live in [`config/funds.yaml`](config/funds.yaml). Loader: [`utils/funds.py`](utils/funds.py) (`FundConfig`, optional `dashboard_group` / `group_id` / `ui_group`, `iter_dashboard_entries()`, `load_funds()`, `units = investment / purchase_nav`).
 
 ```yaml
 funds:
@@ -84,6 +84,8 @@ funds:
 
 Append a new `YYYY-MM-DD,<nav>` row each day after PFRDA / CRA publishes the NAV (same `Date,NAV` header as Tata).
 
+**Dashboard grouping:** the three ICICI NPS schemes set `dashboard_group: icici_nps` in YAML so the UI shows **one** combined sleeve tab — **ICICI Prudential NPS (E+C+G)** — instead of three separate top-level fund tabs. Portfolio snapshots still store each scheme individually.
+
 **Forecasting requires ≥60 NAV observations.** Until a file-NAV fund (Tata / NPS) has enough rows, Ask Manager / Run forecast only will refuse that fund with a clear error (“Need ≥60 NAV rows for forecast.”). Per-fund tabs still work for overview / allocations.
 
 ### Reliable forecasting
@@ -108,22 +110,25 @@ flowchart TB
     P[Portfolio]
     K[Kotak_Multicap]
     T[Tata_AIA_MMQI]
-    N[ICICI_NPS_E_C_G]
+    N[ICICI_NPS_combined]
   end
   P --> snap[Combined_value_DoD_Save_snapshot]
   K --> secs1[Overview_Charts_Alloc_Agents_Forecast]
   T --> secs2[Overview_Charts_Alloc_Agents_Forecast]
-  N --> secs3[Overview_Charts_Alloc_Agents_Forecast]
+  N --> sleeve[Sleeve_totals_alloc_scheme_radio]
+  sleeve --> secs3[Active_scheme_Agents_Forecast]
   sidebar[Sidebar_actions] -->|"active_fund_id"| K
   sidebar -->|"active_fund_id"| T
   sidebar -->|"active_fund_id"| N
 ```
 
-- First tab **Portfolio**: combined total, allocation table, day-over-day vs previous snapshot, **Save today's snapshot**, snapshot date history.
-- Then one **main tab per fund** from the YAML file.
-- Inside each fund: Overview / Charts / Allocations / Agents / Forecast.
-- Sidebar **Ask Manager / Load NAV / Forecast** apply to the **active** fund (sidebar selectbox).
-- Scheduled NSE open/close runs the Manager pipeline for **all funds**.
+- First tab **Portfolio**: combined total, interactive allocation viz, day-over-day vs previous snapshot, **Save today's snapshot**, snapshot date history.
+- Ungrouped funds (Kotak, Tata) each get a **main tab**.
+- **ICICI NPS E / C / G** share one combined tab (`dashboard_group: icici_nps`) with sleeve totals, allocation pie, scheme table, and an inner radio for research/forecast focus (default Scheme E).
+- Inside each fund workspace: Overview / Charts / Allocations / Agents / Forecast.
+- Sidebar **Ask Manager / Load NAV / Forecast** apply to the **active** fund (sidebar selectbox; ICICI entries labeled under the NPS sleeve).
+- Scheduled NSE open/close runs the Manager pipeline for **all funds** (still three ICICI holdings in snapshots).
+- **UI refresh:** dark cyan/teal theme, subtle CSS motion on metrics/cards/banners, richer Altair tooltips / hover highlight / legend toggle — Streamlit + CSS + Altair only.
 
 ---
 

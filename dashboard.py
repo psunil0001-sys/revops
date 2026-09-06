@@ -9,9 +9,11 @@ import streamlit as st
 
 from utils.charts import (
     allocation_bar_chart,
+    allocation_pie_chart,
     forecast_overlay_chart,
     nav_history_chart,
     portfolio_value_chart,
+    stacked_sleeve_value_chart,
 )
 from utils.config import (
     DEFAULT_EMBEDDING_BASE_URL,
@@ -37,7 +39,13 @@ from agents.scheduler import (
     today_ist,
 )
 from agents.server_manager import ServerManager
-from utils.funds import FundConfig, get_fund, load_funds
+from utils.funds import (
+    DashboardGroup,
+    FundConfig,
+    get_fund,
+    iter_dashboard_entries,
+    load_funds,
+)
 from utils.llm import check_embedding_health, check_llm_health, forecast_nav
 from utils.market import (
     attach_benchmark_features,
@@ -74,6 +82,8 @@ TAB_CHARTS = ":material/show_chart: Charts"
 TAB_ALLOC = ":material/pie_chart: Allocations"
 TAB_AGENTS = ":material/smart_toy: Agents"
 TAB_FORECAST = ":material/psychology: Forecast"
+
+DASHBOARD_ENTRIES = list(iter_dashboard_entries())
 
 
 def _default_fund_state() -> dict:
@@ -662,6 +672,16 @@ def _render_fund_workspace(
                     width="stretch",
                     theme=None,
                 )
+                st.altair_chart(
+                    allocation_pie_chart(
+                        asset_df.rename(columns={"Asset Class": "Slice"}),
+                        "Slice",
+                        "Allocation",
+                        height=260,
+                    ),
+                    width="stretch",
+                    theme=None,
+                )
         with a2:
             with st.container(border=True):
                 st.subheader("Equity sector allocation")
@@ -923,11 +943,403 @@ def _current_nav_for_fund(fund: FundConfig) -> float:
     return float(fund.purchase_nav)
 
 
+
+def _inject_theme_css() -> None:
+    """Cohesive dark cyan/teal theme with subtle motion (Streamlit + CSS only)."""
+    st.html(
+        """
+        <style>
+        @keyframes revopsFadeUp {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes revopsShimmer {
+          0% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
+        @keyframes revopsPulseGlow {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0.15); }
+          50% { box-shadow: 0 0 18px 2px rgba(34,211,238,0.22); }
+        }
+        .stApp {
+          background:
+            radial-gradient(1200px 600px at 10% -10%, rgba(34,211,238,0.10), transparent 55%),
+            radial-gradient(900px 500px at 100% 0%, rgba(96,165,250,0.08), transparent 50%),
+            linear-gradient(180deg, #020617 0%, #0B1220 40%, #0F172A 100%);
+        }
+        [data-testid="stSidebar"] {
+          background: linear-gradient(180deg, #020617 0%, #0B1224 100%);
+          border-right: 1px solid rgba(34,211,238,0.18);
+        }
+        [data-testid="stSidebar"] * {
+          transition: color 0.2s ease, background 0.2s ease;
+        }
+        h1 {
+          background: linear-gradient(90deg, #67E8F9, #22D3EE, #60A5FA, #67E8F9);
+          background-size: 220% auto;
+          -webkit-background-clip: text;
+          background-clip: text;
+          color: transparent !important;
+          animation: revopsShimmer 8s ease infinite;
+          letter-spacing: -0.02em;
+        }
+        div[data-testid="stMetric"] {
+          background: linear-gradient(165deg, rgba(34,211,238,0.14), rgba(15,23,42,0.72));
+          border: 1px solid rgba(34,211,238,0.32) !important;
+          border-radius: 14px;
+          padding: 0.45rem 0.7rem;
+          animation: revopsFadeUp 0.55s ease both, revopsPulseGlow 4.5s ease-in-out infinite;
+          transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+        }
+        div[data-testid="stMetric"]:hover {
+          transform: translateY(-2px);
+          border-color: rgba(34,211,238,0.65) !important;
+          box-shadow: 0 8px 24px rgba(34,211,238,0.12);
+        }
+        div[data-testid="stTabs"] button {
+          transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+          border-radius: 10px 10px 0 0;
+        }
+        div[data-testid="stTabs"] button:hover {
+          color: #67E8F9 !important;
+          background: rgba(34,211,238,0.08);
+        }
+        div[data-testid="stTabs"] button[aria-selected="true"] {
+          color: #22D3EE !important;
+          border-bottom-color: #22D3EE !important;
+          background: rgba(34,211,238,0.10);
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+          border: 1px solid rgba(34,211,238,0.22) !important;
+          border-radius: 14px !important;
+          background: rgba(15,23,42,0.55);
+          animation: revopsFadeUp 0.5s ease both;
+          transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+          border-color: rgba(34,211,238,0.45) !important;
+          box-shadow: 0 10px 28px rgba(2,6,23,0.35);
+        }
+        [data-testid="stDataFrame"] {
+          border: 1px solid rgba(34,211,238,0.18);
+          border-radius: 12px;
+          overflow: hidden;
+          animation: revopsFadeUp 0.45s ease both;
+        }
+        .revops-banner {
+          padding: 0.85rem 1.05rem;
+          border-radius: 12px;
+          margin: 0.45rem 0 0.95rem 0;
+          font-weight: 600;
+          animation: revopsFadeUp 0.5s ease both;
+        }
+        .revops-loss {
+          background: rgba(239,68,68,0.16);
+          border: 1px solid #EF4444;
+          color: #FCA5A5;
+        }
+        .revops-gain {
+          background: rgba(34,197,94,0.16);
+          border: 1px solid #22C55E;
+          color: #86EFAC;
+        }
+        .revops-forecast-ready {
+          background: rgba(34,211,238,0.14);
+          border: 1px solid #22D3EE;
+          color: #A5F3FC;
+        }
+        .revops-hero {
+          padding: 1rem 1.15rem;
+          border-radius: 16px;
+          margin: 0.2rem 0 1rem 0;
+          border: 1px solid rgba(34,211,238,0.28);
+          background:
+            linear-gradient(120deg, rgba(34,211,238,0.16), rgba(96,165,250,0.08), rgba(15,23,42,0.55));
+          background-size: 200% 200%;
+          animation: revopsShimmer 10s ease infinite, revopsFadeUp 0.55s ease both;
+        }
+        .revops-hero h3 {
+          margin: 0 0 0.35rem 0;
+          color: #E2E8F0;
+          font-weight: 700;
+        }
+        .revops-hero p {
+          margin: 0;
+          color: #94A3B8;
+          font-size: 0.95rem;
+        }
+        .revops-chip {
+          display: inline-block;
+          padding: 0.15rem 0.55rem;
+          margin: 0.15rem 0.25rem 0 0;
+          border-radius: 999px;
+          border: 1px solid rgba(34,211,238,0.35);
+          background: rgba(34,211,238,0.10);
+          color: #A5F3FC;
+          font-size: 0.78rem;
+          font-weight: 600;
+        }
+        button[kind="primary"] {
+          box-shadow: 0 0 0 1px rgba(34,211,238,0.25), 0 6px 18px rgba(34,211,238,0.12);
+          transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+        button[kind="primary"]:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 0 0 1px rgba(34,211,238,0.4), 0 10px 22px rgba(34,211,238,0.18);
+        }
+        </style>
+        """
+    )
+
+
+def _scheme_short_label(fund: FundConfig) -> str:
+    """Compact label for NPS schemes inside the combined sleeve."""
+    name = fund.name
+    if "Scheme E" in name:
+        return "Scheme E (Equity)"
+    if "Scheme C" in name:
+        return "Scheme C (Corporate)"
+    if "Scheme G" in name:
+        return "Scheme G (Gilt)"
+    return name
+
+
+def _render_group_workspace(
+    group: DashboardGroup,
+    start_date: date,
+    end_date: date,
+) -> None:
+    """Premium combined dashboard for funds sharing a dashboard_group."""
+    funds = group.funds
+    st.html(
+        f"""
+        <div class="revops-hero">
+          <h3>{group.display_name}</h3>
+          <p>Combined NPS sleeve overview — totals, allocation, and per-scheme detail.
+             Ask Manager / Forecast use the active scheme selector below.</p>
+          <div style="margin-top:0.55rem">
+            <span class="revops-chip">{len(funds)} schemes</span>
+            <span class="revops-chip">dashboard_group: {group.group_id}</span>
+          </div>
+        </div>
+        """
+    )
+
+    # Auto-load NAVs for sleeve members
+    for fund in funds:
+        fs = _fs(fund.id)
+        if fs["nav_df_full"] is None and not fs["auto_loaded"] and fs["nav_error"] is None:
+            with st.spinner(f"Loading NAV for {fund.name}…"):
+                refresh_nav(fund)
+
+    rows = []
+    sleeve_long = []
+    total_value = 0.0
+    total_invested = 0.0
+    for fund in funds:
+        nav = _current_nav_for_fund(fund)
+        value = float(fund.units * nav)
+        total_value += value
+        total_invested += float(fund.investment)
+        short = _scheme_short_label(fund)
+        rows.append(
+            {
+                "Scheme": short,
+                "Id": fund.id,
+                "Units": fund.units,
+                "NAV": nav,
+                "Value": value,
+                "Invested": fund.investment,
+                "P&L": value - fund.investment,
+                "Weight %": 0.0,  # filled below
+                "Equity %": fund.equity_pct,
+            }
+        )
+        # Build long series for stacked chart (file NAVs may be 1 row)
+        fs = _fs(fund.id)
+        nav_df = fs.get("nav_df_full")
+        if nav_df is None or (hasattr(nav_df, "empty") and nav_df.empty):
+            try:
+                nav_df = fetch_nav_history_for_fund(fund)
+            except Exception:  # noqa: BLE001
+                nav_df = None
+        if nav_df is not None and not nav_df.empty:
+            for _, r in nav_df.iterrows():
+                sleeve_long.append(
+                    {
+                        "Date": r["Date"],
+                        "Scheme": short,
+                        "Value": float(r["NAV"]) * fund.units,
+                    }
+                )
+        else:
+            sleeve_long.append(
+                {
+                    "Date": date.today().isoformat(),
+                    "Scheme": short,
+                    "Value": value,
+                }
+            )
+
+    for row in rows:
+        row["Weight %"] = (
+            round(row["Value"] / total_value * 100.0, 2) if total_value else 0.0
+        )
+
+    pnl = total_value - total_invested
+    roi = ((total_value / total_invested - 1) * 100) if total_invested else 0.0
+
+    st.subheader("Sleeve summary")
+    with st.container(horizontal=True):
+        st.metric("Total NPS value", inr(total_value, 2), border=True)
+        st.metric("Total invested", inr(total_invested, 2), border=True)
+        st.metric(
+            "P&L",
+            inr(pnl, 2),
+            delta=f"{roi:.2f}%",
+            border=True,
+        )
+        st.metric("Schemes", str(len(funds)), border=True)
+
+    alloc_df = pd.DataFrame(
+        [{"Scheme": r["Scheme"], "Allocation": r["Weight %"], "Value": r["Value"]} for r in rows]
+    )
+    # Asset mix from sector / equity_pct fields, value-weighted
+    mix_labels = {
+        "icici_nps_e": "E · Equity",
+        "icici_nps_c": "C · Corporate bonds",
+        "icici_nps_g": "G · Gilt / G-Secs",
+    }
+    mix_rows = []
+    for fund, row in zip(funds, rows):
+        label = mix_labels.get(fund.id)
+        if label is None:
+            # Fallback: first sector key or Equity/Other
+            if fund.sectors:
+                label = next(iter(fund.sectors.keys()))
+            elif fund.equity_pct >= 50:
+                label = "Equity"
+            else:
+                label = "Debt / Other"
+        mix_rows.append({"Asset": label, "Allocation": row["Weight %"], "Value": row["Value"]})
+    mix_df = pd.DataFrame(mix_rows)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.container(border=True):
+            st.subheader("Allocation across E / C / G")
+            st.altair_chart(
+                allocation_pie_chart(alloc_df, "Scheme", "Value"),
+                width="stretch",
+                theme=None,
+            )
+            st.altair_chart(
+                allocation_bar_chart(alloc_df, "Scheme", "Allocation", height=220),
+                width="stretch",
+                theme=None,
+            )
+    with c2:
+        with st.container(border=True):
+            st.subheader("Asset mix summary")
+            st.caption("E equity / C corporate / G gilt — value-weighted sleeve weights.")
+            st.altair_chart(
+                allocation_pie_chart(mix_df, "Asset", "Value"),
+                width="stretch",
+                theme=None,
+            )
+            st.dataframe(
+                mix_df,
+                column_config={
+                    "Asset": st.column_config.TextColumn("Asset"),
+                    "Allocation": st.column_config.NumberColumn("Weight %", format="%.2f%%"),
+                    "Value": st.column_config.NumberColumn("Value", format="₹%.2f"),
+                },
+                hide_index=True,
+                width="stretch",
+            )
+
+    st.subheader("Schemes")
+    schemes_df = pd.DataFrame(rows)
+    st.dataframe(
+        schemes_df,
+        column_config={
+            "Scheme": st.column_config.TextColumn("Scheme"),
+            "Id": st.column_config.TextColumn("Id"),
+            "Units": st.column_config.NumberColumn("Units", format="%.4f"),
+            "NAV": st.column_config.NumberColumn("NAV", format="₹%.4f"),
+            "Value": st.column_config.NumberColumn("Value", format="₹%.2f"),
+            "Invested": st.column_config.NumberColumn("Invested", format="₹%.2f"),
+            "P&L": st.column_config.NumberColumn("P&L", format="₹%.2f"),
+            "Weight %": st.column_config.NumberColumn("Weight %", format="%.2f%%"),
+            "Equity %": st.column_config.NumberColumn("Equity %", format="%.1f%%"),
+        },
+        hide_index=True,
+        width="stretch",
+    )
+
+    with st.container(border=True):
+        st.subheader("Combined sleeve value")
+        st.caption(
+            "Stacked scheme values from available NAV history "
+            "(file NAVs may be a single row — current levels still shown)."
+        )
+        sleeve_df = pd.DataFrame(sleeve_long)
+        if not sleeve_df.empty:
+            st.altair_chart(
+                stacked_sleeve_value_chart(sleeve_df),
+                width="stretch",
+                theme=None,
+            )
+        else:
+            st.info("No NAV history available for sleeve chart yet.")
+
+    st.divider()
+    st.subheader("Active scheme for research / forecast")
+    st.caption(
+        "Ask Manager, Load NAV, and Forecast in the sidebar target this scheme. "
+        "Agents / Forecast workspace below reuses the standard per-fund view."
+    )
+    default_id = funds[0].id
+    # Prefer Scheme E when present
+    for f in funds:
+        if f.id.endswith("_e") or "Scheme E" in f.name:
+            default_id = f.id
+            break
+    options = [f.id for f in funds]
+    # Keep radio in sync with active_fund_id when already one of the group
+    current = st.session_state.get("active_fund_id")
+    index = options.index(current) if current in options else options.index(default_id)
+    chosen = st.radio(
+        "Active scheme",
+        options=options,
+        index=index,
+        format_func=lambda fid: _scheme_short_label(get_fund(fid)),
+        horizontal=True,
+        key=f"group_active_scheme_{group.group_id}",
+        help="Research / forecast focus inside this combined tab.",
+    )
+    if st.session_state.active_fund_id != chosen:
+        st.session_state.active_fund_id = chosen
+
+    st.markdown("#### Scheme workspace")
+    _render_fund_workspace(get_fund(chosen), start_date, end_date)
+
+
 def _render_portfolio_workspace() -> None:
     """Combined allocation, day-over-day, and snapshot controls."""
+    st.html(
+        """
+        <div class="revops-hero">
+          <h3>Portfolio overview</h3>
+          <p>Live combined holdings from <code>config/funds.yaml</code> —
+             allocation, day-over-day, and snapshot controls.</p>
+        </div>
+        """
+    )
     st.caption(
-        "Combined view of all funds in `config/funds.yaml`. "
-        f"Need ≥{MIN_FORECAST_OBSERVATIONS} NAV rows for forecast on a fund tab."
+        "Need ≥"
+        f"{MIN_FORECAST_OBSERVATIONS} NAV rows for forecast on a fund / sleeve tab."
     )
 
     nav_by_id = {f.id: _current_nav_for_fund(f) for f in FUNDS}
@@ -960,6 +1372,30 @@ def _render_portfolio_workspace() -> None:
             delta=f"{((total_value / invested - 1) * 100) if invested else 0:.2f}%",
             border=True,
         )
+
+    viz_l, viz_r = st.columns([1, 1])
+    with viz_l:
+        with st.container(border=True):
+            st.subheader("Allocation mix")
+            pie_src = alloc_df.rename(columns={"Fund": "Slice", "Value": "Value"})
+            st.altair_chart(
+                allocation_pie_chart(
+                    pie_src[["Slice", "Value"]], "Slice", "Value"
+                ),
+                width="stretch",
+                theme=None,
+            )
+    with viz_r:
+        with st.container(border=True):
+            st.subheader("Weight bars")
+            bar_src = alloc_df.rename(
+                columns={"Fund": "Slice", "Allocation %": "Allocation"}
+            )
+            st.altair_chart(
+                allocation_bar_chart(bar_src, "Slice", "Allocation", height=260),
+                width="stretch",
+                theme=None,
+            )
 
     st.dataframe(
         alloc_df,
@@ -1097,45 +1533,12 @@ for _fund in FUNDS:
                 _fund_fs["forecast"] = _bundle["forecast"]
 
 st.title("Multi-fund portfolio tracker")
-st.caption(f"{len(FUNDS)} funds · NAV + agents + forecast per fund")
-
-st.html(
-    """
-    <style>
-    div[data-testid="stMetric"] {
-        background: linear-gradient(180deg, rgba(34,211,238,0.12), rgba(30,41,59,0.55));
-        border: 1px solid rgba(34,211,238,0.35) !important;
-        border-radius: 12px;
-        padding: 0.35rem 0.6rem;
-    }
-    div[data-testid="stTabs"] button[aria-selected="true"] {
-        color: #22D3EE !important;
-        border-bottom-color: #22D3EE !important;
-    }
-    .revops-banner {
-        padding: 0.75rem 1rem;
-        border-radius: 10px;
-        margin: 0.4rem 0 0.9rem 0;
-        font-weight: 600;
-    }
-    .revops-loss {
-        background: rgba(239,68,68,0.18);
-        border: 1px solid #EF4444;
-        color: #FCA5A5;
-    }
-    .revops-gain {
-        background: rgba(34,197,94,0.18);
-        border: 1px solid #22C55E;
-        color: #86EFAC;
-    }
-    .revops-forecast-ready {
-        background: rgba(34,211,238,0.16);
-        border: 1px solid #22D3EE;
-        color: #A5F3FC;
-    }
-    </style>
-    """
+n_entries = len(DASHBOARD_ENTRIES)
+st.caption(
+    f"{len(FUNDS)} holdings · {n_entries} dashboard tabs · "
+    "NAV + agents + forecast · polished dark UI"
 )
+_inject_theme_css()
 
 today = date.today()
 active_fund = get_fund(st.session_state.active_fund_id)
@@ -1152,12 +1555,21 @@ if active_full is not None and not active_full.empty:
 
 with st.sidebar:
     st.header("Controls")
+    def _sidebar_fund_label(fid: str) -> str:
+        fund = next(f for f in FUNDS if f.id == fid)
+        if fund.dashboard_group:
+            return f"ICICI NPS · {_scheme_short_label(fund)}"
+        return fund.name
+
     st.selectbox(
         "Active fund",
         options=[f.id for f in FUNDS],
-        format_func=lambda fid: next(f.name for f in FUNDS if f.id == fid),
+        format_func=_sidebar_fund_label,
         key="active_fund_id",
-        help="Sidebar actions (Load NAV, Ask Manager, Forecast) target this fund.",
+        help=(
+            "Sidebar actions (Load NAV, Ask Manager, Forecast) target this fund. "
+            "ICICI NPS schemes share one combined top tab; picker selects research focus."
+        ),
     )
     # Re-resolve after selectbox may have updated session state
     active_fund = get_fund(st.session_state.active_fund_id)
@@ -1436,12 +1848,21 @@ if run_forecast:
                     f"main_tabs_{active_fund.id}_forecast", None
                 )
 
-top_labels = [TAB_PORTFOLIO] + [f.name for f in FUNDS]
+def _entry_tab_label(entry) -> str:
+    if isinstance(entry, DashboardGroup):
+        return entry.display_name
+    return entry.name
+
+
+top_labels = [TAB_PORTFOLIO] + [_entry_tab_label(e) for e in DASHBOARD_ENTRIES]
 top_tabs = st.tabs(top_labels)
 with top_tabs[0]:
     _render_portfolio_workspace()
-for tab, fund in zip(top_tabs[1:], FUNDS):
+for tab, entry in zip(top_tabs[1:], DASHBOARD_ENTRIES):
     with tab:
-        _render_fund_workspace(fund, start_date, end_date)
+        if isinstance(entry, DashboardGroup):
+            _render_group_workspace(entry, start_date, end_date)
+        else:
+            _render_fund_workspace(entry, start_date, end_date)
 
-st.caption("Multi-fund portfolio tracker")
+st.caption("Multi-fund portfolio tracker · UI refresh + combined ICICI NPS sleeve")

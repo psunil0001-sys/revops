@@ -48,6 +48,7 @@ funds:
   - id: icici_nps_e
     name: ICICI Prudential Pension Fund — Scheme E
     type: nps
+    dashboard_group: icici_nps
     nav_source: file
     nav_file: data/nav/icici_nps_e.csv
     inception_date: "2020-01-01"
@@ -66,6 +67,7 @@ funds:
   - id: icici_nps_c
     name: ICICI Prudential Pension Fund — Scheme C
     type: nps
+    dashboard_group: icici_nps
     nav_source: file
     nav_file: data/nav/icici_nps_c.csv
     inception_date: "2020-01-01"
@@ -84,6 +86,7 @@ funds:
   - id: icici_nps_g
     name: ICICI Prudential Pension Fund — Scheme G
     type: nps
+    dashboard_group: icici_nps
     nav_source: file
     nav_file: data/nav/icici_nps_g.csv
     inception_date: "2020-01-01"

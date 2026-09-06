@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from utils.config import _REPO_ROOT
 
@@ -15,6 +16,11 @@ FUNDS_YAML_PATH = _REPO_ROOT / "config" / "funds.yaml"
 
 FundType = Literal["mutual_fund", "ulip", "nps"]
 NavSource = Literal["mfapi", "file"]
+
+# Human labels for dashboard_group ids (fallback: title-cased id).
+GROUP_DISPLAY_NAMES: dict[str, str] = {
+    "icici_nps": "ICICI Prudential NPS (E+C+G)",
+}
 
 
 class FundConfig(BaseModel):
@@ -33,6 +39,10 @@ class FundConfig(BaseModel):
     sectors: dict[str, float] = Field(default_factory=dict)
     research_queries: list[str] = Field(default_factory=list)
     benchmark_symbol: str = "^NSEI"
+    dashboard_group: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("dashboard_group", "group_id", "ui_group"),
+    )
 
     @field_validator("inception_date", mode="before")
     @classmethod
@@ -92,6 +102,28 @@ class FundConfig(BaseModel):
         return path
 
 
+@dataclass(frozen=True)
+class DashboardGroup:
+    """Bundle of funds that share one top-level dashboard tab."""
+
+    group_id: str
+    funds: tuple[FundConfig, ...]
+
+    @property
+    def display_name(self) -> str:
+        return GROUP_DISPLAY_NAMES.get(
+            self.group_id,
+            self.group_id.replace("_", " ").title(),
+        )
+
+    @property
+    def fund_ids(self) -> tuple[str, ...]:
+        return tuple(f.id for f in self.funds)
+
+
+DashboardEntry = Union[FundConfig, DashboardGroup]
+
+
 @lru_cache(maxsize=1)
 def load_funds(path: str | None = None) -> tuple[FundConfig, ...]:
     import yaml
@@ -115,6 +147,41 @@ def get_fund(fund_id: str) -> FundConfig:
         if fund.id == fund_id:
             return fund
     raise KeyError(f"Unknown fund id: {fund_id}")
+
+
+def get_funds_in_group(group_id: str) -> tuple[FundConfig, ...]:
+    """Return funds belonging to ``group_id`` in YAML order."""
+    return tuple(f for f in load_funds() if f.dashboard_group == group_id)
+
+
+def group_display_name(group_id: str) -> str:
+    return GROUP_DISPLAY_NAMES.get(
+        group_id,
+        group_id.replace("_", " ").title(),
+    )
+
+
+def iter_dashboard_entries(
+    funds: tuple[FundConfig, ...] | None = None,
+) -> Iterator[DashboardEntry]:
+    """Yield top-level dashboard entries: ungrouped funds or group bundles.
+
+    Funds that share a ``dashboard_group`` collapse into one ``DashboardGroup``
+    (emitted once, at the position of the first member). Ungrouped funds yield
+    as themselves in YAML order.
+    """
+    items = funds if funds is not None else load_funds()
+    seen_groups: set[str] = set()
+    for fund in items:
+        gid = fund.dashboard_group
+        if not gid:
+            yield fund
+            continue
+        if gid in seen_groups:
+            continue
+        seen_groups.add(gid)
+        members = tuple(f for f in items if f.dashboard_group == gid)
+        yield DashboardGroup(group_id=gid, funds=members)
 
 
 def clear_funds_cache() -> None:
