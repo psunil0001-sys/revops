@@ -14,3 +14,8 @@ data/memory/
 # Keep seeded ULIP CSV examples tracked; ignore ad-hoc dumps if needed
 .streamlit/secrets.toml
 log/
+
+# Daily portfolio snapshots (keep seed + gitkeep)
+data/snapshots/*.json
+!data/snapshots/.gitkeep
+!data/snapshots/2026-09-06.json

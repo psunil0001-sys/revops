@@ -13,7 +13,7 @@ from utils.config import _REPO_ROOT
 
 FUNDS_YAML_PATH = _REPO_ROOT / "config" / "funds.yaml"
 
-FundType = Literal["mutual_fund", "ulip"]
+FundType = Literal["mutual_fund", "ulip", "nps"]
 NavSource = Literal["mfapi", "file"]
 
 

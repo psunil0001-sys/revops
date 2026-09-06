@@ -1,0 +1,685 @@
+diff --git a/.gitignore b/.gitignore
+index 69b4e37..bfb86af 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -14,3 +14,8 @@ data/memory/
+ # Keep seeded ULIP CSV examples tracked; ignore ad-hoc dumps if needed
+ .streamlit/secrets.toml
+ log/
++
++# Daily portfolio snapshots (keep seed + gitkeep)
++data/snapshots/*.json
++!data/snapshots/.gitkeep
++!data/snapshots/2026-09-06.json
+diff --git a/README.md b/README.md
+index 74acb56..a3d8305 100644
+--- a/README.md
++++ b/README.md
+@@ -8,17 +8,22 @@ Default funds:
+ |------|------|------------|------------|
+ | Kotak Multicap Fund - Regular Plan - Growth | Mutual fund | mfapi.in | Scheme `149182` |
+ | Tata AIA Multicap Momentum Quality Index Fund | ULIP | Local CSV | SFIN `ULIF 078 31/12/24 MQI 110` |
++| ICICI Prudential Pension Fund — Scheme E | NPS | Local CSV | `icici_nps_e` |
++| ICICI Prudential Pension Fund — Scheme C | NPS | Local CSV | `icici_nps_c` |
++| ICICI Prudential Pension Fund — Scheme G | NPS | Local CSV | `icici_nps_g` |
+ 
+ > Research and scenario forecasts only — **not investment advice**. Past performance does not guarantee future results.
+ 
++> **Kotak cost basis:** YAML keeps `investment: 99995` @ `purchase_nav: 20.30` (units ≈ 4925.86). A user book of 4926.833 units @ 20.18 (= ₹99,423) is close but not applied — leaving YAML as-is avoids breaking the tracked cost basis.
++
+ ---
+ 
+ ## What it does
+ 
+ | Area | Capability |
+ |------|------------|
+-| **Multi-fund** | YAML-driven funds; one top-level tab per fund with isolated NAV / agents / forecast |
+-| **Portfolio** | NAV history (mfapi or file), P&L, ROI, CAGR, drawdown, allocations |
++| **Multi-fund** | YAML-driven funds; Portfolio tab + one top-level tab per fund with isolated NAV / agents / forecast |
++| **Portfolio** | Combined allocation, day-over-day vs prior snapshot, **Save today's snapshot**; per-fund NAV / P&L / ROI / CAGR |
+ | **Research** | Five analysts: Fundamentals, Sentiment, News, Technical, **Policy** |
+ | **Memory** | Raw JSON under `data/raw/{fund_id}/`, Chroma with `fund_id` metadata |
+ | **Forecast** | Bootstrap p10/p50/p90 trading-day paths (60 default); LLM refine clamped to baseline; walk-forward coverage |
+@@ -51,6 +56,13 @@ funds:
+     investment: 44741.01
+     purchase_nav: 9.3108
+     benchmark_symbol: "^NSEI"
++
++  - id: icici_nps_e
++    type: nps
++    nav_source: file
++    nav_file: data/nav/icici_nps_e.csv
++    investment: 72482.51
++    purchase_nav: 74.2416
+ ```
+ 
+ ### NAV sources
+@@ -62,7 +74,17 @@ funds:
+ 
+ **ULIP note:** Tata AIA Multicap Momentum Quality is a life-insurance ULIP, not an AMFI mutual fund — there is **no** mfapi scheme code. Maintain NAV by appending rows to [`data/nav/tata_aia_mmqi.csv`](data/nav/tata_aia_mmqi.csv). Seeded with purchase NAV **9.3108** (investment ₹44,741.01).
+ 
+-**Forecasting requires ≥60 NAV observations.** Until the Tata AIA CSV has enough rows, Ask Manager / Run forecast only will refuse that fund with a clear error. Append dated NAV rows as you receive them from the insurer.
++**NPS note:** ICICI Prudential Pension Fund schemes **E / C / G** use `type: nps` and `nav_source: file`. Seeded CSVs:
++
++| File | Seed NAV (2026-09-06) | Investment |
++|------|----------------------|------------|
++| [`data/nav/icici_nps_e.csv`](data/nav/icici_nps_e.csv) | 74.2416 | ₹72,482.51 |
++| [`data/nav/icici_nps_c.csv`](data/nav/icici_nps_c.csv) | 46.5038 | ₹42,396.07 |
++| [`data/nav/icici_nps_g.csv`](data/nav/icici_nps_g.csv) | 38.6797 | ₹28,277.69 |
++
++Append a new `YYYY-MM-DD,<nav>` row each day after PFRDA / CRA publishes the NAV (same `Date,NAV` header as Tata).
++
++**Forecasting requires ≥60 NAV observations.** Until a file-NAV fund (Tata / NPS) has enough rows, Ask Manager / Run forecast only will refuse that fund with a clear error (“Need ≥60 NAV rows for forecast.”). Per-fund tabs still work for overview / allocations.
+ 
+ ### Reliable forecasting
+ 
+@@ -82,17 +104,23 @@ funds:
+ 
+ ```mermaid
+ flowchart TB
+-  subgraph top [Top_level_fund_tabs]
++  subgraph top [Top_level_tabs]
++    P[Portfolio]
+     K[Kotak_Multicap]
+     T[Tata_AIA_MMQI]
++    N[ICICI_NPS_E_C_G]
+   end
++  P --> snap[Combined_value_DoD_Save_snapshot]
+   K --> secs1[Overview_Charts_Alloc_Agents_Forecast]
+   T --> secs2[Overview_Charts_Alloc_Agents_Forecast]
++  N --> secs3[Overview_Charts_Alloc_Agents_Forecast]
+   sidebar[Sidebar_actions] -->|"active_fund_id"| K
+   sidebar -->|"active_fund_id"| T
++  sidebar -->|"active_fund_id"| N
+ ```
+ 
+-- One **main tab per fund** from the YAML file.
++- First tab **Portfolio**: combined total, allocation table, day-over-day vs previous snapshot, **Save today's snapshot**, snapshot date history.
++- Then one **main tab per fund** from the YAML file.
+ - Inside each fund: Overview / Charts / Allocations / Agents / Forecast.
+ - Sidebar **Ask Manager / Load NAV / Forecast** apply to the **active** fund (sidebar selectbox).
+ - Scheduled NSE open/close runs the Manager pipeline for **all funds**.
+@@ -255,7 +283,13 @@ flowchart TB
+ ```
+ data/
+ ├── nav/
+-│   └── tata_aia_mmqi.csv         # ULIP file NAV (append Date,NAV rows)
++│   ├── tata_aia_mmqi.csv         # ULIP file NAV (append Date,NAV rows)
++│   ├── icici_nps_e.csv           # NPS Scheme E file NAV
++│   ├── icici_nps_c.csv           # NPS Scheme C file NAV
++│   └── icici_nps_g.csv           # NPS Scheme G file NAV
++├── snapshots/
++│   ├── .gitkeep
++│   └── 2026-09-06.json           # seeded daily portfolio snapshot (others gitignored)
+ ├── raw/
+ │   └── {fund_id}/
+ │       └── {run_id}/             # one folder per pipeline run
+@@ -302,7 +336,7 @@ revops/
+ │   ├── research/             # five analysts incl. policy
+ │   ├── memory/
+ │   └── rag/
+-├── utils/                    # funds, config, nav, llm, charts
++├── utils/                    # funds, snapshots, config, nav, llm, charts
+ ├── data/                     # runtime artifacts (gitignored; seed NAV tracked)
+ └── log/
+ ```
+@@ -372,7 +406,8 @@ Open the URL Streamlit prints (usually `http://localhost:8501`).
+ 4. Toggle **Use local LLM** on.
+ 5. Click **Ask Manager: run now** (active fund only).
+ 6. Open that fund’s **Agents** / **Forecast** tabs.
+-7. For Tata AIA ULIP: append NAV rows to `data/nav/tata_aia_mmqi.csv` until you have **≥60** points before forecasting.
++7. For Tata AIA ULIP / ICICI NPS: append NAV rows to the matching `data/nav/*.csv` until you have **≥60** points before forecasting.
++8. Open the **Portfolio** tab → review combined value → **Save today's snapshot** (writes `data/snapshots/YYYY-MM-DD.json`).
+ 
+ Heartbeat badges refresh about every 60s. After a Manager run, servers should show down until the next LLM pipeline (or manual **Start servers**).
+ 
+@@ -400,6 +435,7 @@ flowchart LR
+ - **Ask Manager: run now** — full research + memory + trading-day scenario forecast for the **active** fund; ignores NSE clock. Analyst fan-out respects **Max parallel calls**.
+ - **Run forecast only** — active fund only; bootstrap (± LLM) on **full** NAV; no analysts.
+ - **Scheduled research** — automatic at NSE open **09:15** and close **15:30** IST; **all funds** queued with the same concurrency limit.
++- **Save today's snapshot** (Portfolio tab) — persist combined holdings + total under `data/snapshots/` for day-over-day.
+ 
+ ---
+ 
+@@ -425,6 +461,8 @@ flowchart LR
+ | Forecast fails / blocked | <60 NAV rows (common for Tata file NAV) | Append `Date,NAV` rows; check Forecast error banner |
+ | Forecast fails with LLM on | Chat server or bad JSON | Falls back to bootstrap; check `log/llama_chat.log` / LLM response tab |
+ | Tata AIA empty / stale NAV | File not updated | Append `Date,NAV` to `data/nav/tata_aia_mmqi.csv` |
++| NPS empty / stale NAV | File not updated | Append `Date,NAV` to `data/nav/icici_nps_{e,c,g}.csv` |
++| No day-over-day on Portfolio | Only one snapshot | Save today's snapshot on consecutive days |
+ | Reddit / news empty | Network or rate limit | Check `data/raw/{fund_id}/.../meta` |
+ | Schedule never fires | Weekend or already completed | Check sidebar “Next slot” / last completed |
+ 
+diff --git a/config/funds.yaml b/config/funds.yaml
+index 0c92c0e..80db896 100644
+--- a/config/funds.yaml
++++ b/config/funds.yaml
+@@ -44,3 +44,57 @@ funds:
+       - "Nifty 500 Multicap Momentum Quality 50"
+       - "IRDAI ULIP regulations"
+       - "Tata AIA life insurance ULIP"
++
++  - id: icici_nps_e
++    name: ICICI Prudential Pension Fund — Scheme E
++    type: nps
++    nav_source: file
++    nav_file: data/nav/icici_nps_e.csv
++    inception_date: "2020-01-01"
++    investment: 72482.51
++    purchase_nav: 74.2416
++    equity_pct: 100.0
++    other_pct: 0.0
++    benchmark_symbol: "^NSEI"
++    sectors:
++      Equity: 100.0
++    research_queries:
++      - "ICICI NPS Scheme E"
++      - "NPS equity"
++      - "PFRDA"
++
++  - id: icici_nps_c
++    name: ICICI Prudential Pension Fund — Scheme C
++    type: nps
++    nav_source: file
++    nav_file: data/nav/icici_nps_c.csv
++    inception_date: "2020-01-01"
++    investment: 42396.07
++    purchase_nav: 46.5038
++    equity_pct: 0.0
++    other_pct: 100.0
++    benchmark_symbol: "^NSEI"
++    sectors:
++      Corporate Bonds: 100.0
++    research_queries:
++      - "ICICI NPS Scheme C"
++      - "NPS corporate bond"
++      - "PFRDA"
++
++  - id: icici_nps_g
++    name: ICICI Prudential Pension Fund — Scheme G
++    type: nps
++    nav_source: file
++    nav_file: data/nav/icici_nps_g.csv
++    inception_date: "2020-01-01"
++    investment: 28277.69
++    purchase_nav: 38.6797
++    equity_pct: 0.0
++    other_pct: 100.0
++    benchmark_symbol: "^NSEI"
++    sectors:
++      Government Securities: 100.0
++    research_queries:
++      - "ICICI NPS Scheme G"
++      - "NPS government securities"
++      - "PFRDA"
+diff --git a/dashboard.py b/dashboard.py
+index a932ef8..a9736a1 100644
+--- a/dashboard.py
++++ b/dashboard.py
+@@ -52,6 +52,13 @@ from utils.portfolio import (
+     get_sector_dataframe,
+     inr,
+ )
++from utils.snapshots import (
++    build_snapshot_from_funds,
++    day_over_day,
++    list_snapshots,
++    load_snapshot,
++    save_snapshot,
++)
+ 
+ FUNDS = load_funds()
+ 
+@@ -61,6 +68,7 @@ st.set_page_config(
+     layout="wide",
+ )
+ 
++TAB_PORTFOLIO = ":material/account_balance_wallet: Portfolio"
+ TAB_OVERVIEW = ":material/dashboard: Overview"
+ TAB_CHARTS = ":material/show_chart: Charts"
+ TAB_ALLOC = ":material/pie_chart: Allocations"
+@@ -899,6 +907,176 @@ def _render_fund_workspace(
+                 st.json(display_features)
+ 
+ 
++def _current_nav_for_fund(fund: FundConfig) -> float:
++    """Latest NAV from session cache / file / purchase_nav fallback."""
++    fs = _fs(fund.id)
++    full_df = fs.get("nav_df_full")
++    if full_df is not None and not full_df.empty:
++        return float(full_df.iloc[-1]["NAV"])
++    if fund.nav_source == "file":
++        try:
++            nav_df = fetch_nav_history_for_fund(fund)
++            if not nav_df.empty:
++                return float(nav_df.iloc[-1]["NAV"])
++        except Exception:  # noqa: BLE001
++            pass
++    return float(fund.purchase_nav)
++
++
++def _render_portfolio_workspace() -> None:
++    """Combined allocation, day-over-day, and snapshot controls."""
++    st.caption(
++        "Combined view of all funds in `config/funds.yaml`. "
++        f"Need ≥{MIN_FORECAST_OBSERVATIONS} NAV rows for forecast on a fund tab."
++    )
++
++    nav_by_id = {f.id: _current_nav_for_fund(f) for f in FUNDS}
++    holdings, total_value = build_snapshot_from_funds(FUNDS, nav_by_id)
++
++    alloc_rows = []
++    for h in holdings:
++        weight = (h["value"] / total_value * 100.0) if total_value else 0.0
++        alloc_rows.append(
++            {
++                "Fund": h["name"],
++                "Id": h["id"],
++                "Units": h["units"],
++                "NAV": h["nav"],
++                "Value": h["value"],
++                "Allocation %": round(weight, 2),
++            }
++        )
++    alloc_df = pd.DataFrame(alloc_rows)
++
++    st.subheader("Combined portfolio")
++    with st.container(horizontal=True):
++        st.metric("Total value", inr(total_value, 2), border=True)
++        st.metric("Funds", str(len(FUNDS)), border=True)
++        invested = sum(f.investment for f in FUNDS)
++        st.metric("Cost basis", inr(invested, 2), border=True)
++        st.metric(
++            "P&L",
++            inr(total_value - invested, 2),
++            delta=f"{((total_value / invested - 1) * 100) if invested else 0:.2f}%",
++            border=True,
++        )
++
++    st.dataframe(
++        alloc_df,
++        column_config={
++            "Fund": st.column_config.TextColumn("Fund"),
++            "Id": st.column_config.TextColumn("Id"),
++            "Units": st.column_config.NumberColumn("Units", format="%.4f"),
++            "NAV": st.column_config.NumberColumn("NAV", format="₹%.4f"),
++            "Value": st.column_config.NumberColumn("Value", format="₹%.2f"),
++            "Allocation %": st.column_config.NumberColumn(
++                "Allocation %", format="%.2f%%"
++            ),
++        },
++        hide_index=True,
++        width="stretch",
++    )
++
++    dates = list_snapshots()
++    # Compare live totals to the latest *prior* snapshot date (not today).
++    dod_curr = {
++        "date": date.today().isoformat(),
++        "total_value": total_value,
++        "holdings": holdings,
++    }
++    dod_prev = None
++    today_iso = date.today().isoformat()
++    for snap_date in dates:
++        if snap_date != today_iso:
++            dod_prev = load_snapshot(snap_date)
++            break
++    # If only today's snapshot exists, compare live vs yesterday when available.
++    if dod_prev is None and len(dates) >= 2:
++        dod_prev = load_snapshot(dates[1])
++        dod_curr = load_snapshot(dates[0]) or dod_curr
++
++    dod = day_over_day(dod_prev, dod_curr)
++    st.subheader("Day-over-day")
++    if dod["delta_value"] is None:
++        st.info(
++            "No previous snapshot to compare. Save today's snapshot, then "
++            "compare on a later day."
++        )
++    else:
++        with st.container(horizontal=True):
++            st.metric(
++                "Δ value",
++                inr(dod["delta_value"], 2),
++                delta=(
++                    f"{dod['delta_pct']:.2f}%"
++                    if dod["delta_pct"] is not None
++                    else None
++                ),
++                border=True,
++            )
++            st.metric(
++                "Previous total",
++                inr(dod["prev_total"], 2) if dod["prev_total"] is not None else "—",
++                border=True,
++            )
++            st.metric(
++                "Current total",
++                inr(dod["curr_total"], 2) if dod["curr_total"] is not None else "—",
++                border=True,
++            )
++        if dod["holdings"]:
++            dod_df = pd.DataFrame(
++                [
++                    {
++                        "Fund": row["name"],
++                        "Previous": row["prev_value"],
++                        "Current": row["curr_value"],
++                        "Δ": row["delta_value"],
++                    }
++                    for row in dod["holdings"]
++                ]
++            )
++            st.dataframe(
++                dod_df,
++                column_config={
++                    "Fund": st.column_config.TextColumn("Fund"),
++                    "Previous": st.column_config.NumberColumn(
++                        "Previous", format="₹%.2f"
++                    ),
++                    "Current": st.column_config.NumberColumn(
++                        "Current", format="₹%.2f"
++                    ),
++                    "Δ": st.column_config.NumberColumn("Δ", format="₹%.2f"),
++                },
++                hide_index=True,
++                width="stretch",
++            )
++
++    col_save, col_hist = st.columns([1, 2])
++    with col_save:
++        if st.button(
++            "Save today's snapshot",
++            type="primary",
++            icon=":material/save:",
++            width="stretch",
++            help="Write data/snapshots/YYYY-MM-DD.json from current NAVs",
++        ):
++            out = save_snapshot(date.today(), holdings, total_value)
++            st.success(f"Saved snapshot for {date.today().isoformat()} → `{out}`")
++            st.rerun()
++    with col_hist:
++        st.caption("Snapshot history")
++        if dates:
++            st.write(", ".join(dates[:12]) + ("…" if len(dates) > 12 else ""))
++        else:
++            st.write("No snapshots yet.")
++
++    st.caption(
++        "NPS / ULIP file NAV: append `Date,NAV` rows under `data/nav/`. "
++        f"Forecast needs ≥{MIN_FORECAST_OBSERVATIONS} NAV observations."
++    )
++
++
+ # ---------------------------------------------------------------------------
+ # App body
+ # ---------------------------------------------------------------------------
+@@ -1258,8 +1436,11 @@ if run_forecast:
+                     f"main_tabs_{active_fund.id}_forecast", None
+                 )
+ 
+-fund_tabs = st.tabs([f.name for f in FUNDS])
+-for tab, fund in zip(fund_tabs, FUNDS):
++top_labels = [TAB_PORTFOLIO] + [f.name for f in FUNDS]
++top_tabs = st.tabs(top_labels)
++with top_tabs[0]:
++    _render_portfolio_workspace()
++for tab, fund in zip(top_tabs[1:], FUNDS):
+     with tab:
+         _render_fund_workspace(fund, start_date, end_date)
+ 
+diff --git a/data/nav/icici_nps_c.csv b/data/nav/icici_nps_c.csv
+new file mode 100644
+index 0000000..a2d4ae0
+--- /dev/null
++++ b/data/nav/icici_nps_c.csv
+@@ -0,0 +1,2 @@
++Date,NAV
++2026-09-06,46.5038
+diff --git a/data/nav/icici_nps_e.csv b/data/nav/icici_nps_e.csv
+new file mode 100644
+index 0000000..02e2ab3
+--- /dev/null
++++ b/data/nav/icici_nps_e.csv
+@@ -0,0 +1,2 @@
++Date,NAV
++2026-09-06,74.2416
+diff --git a/data/nav/icici_nps_g.csv b/data/nav/icici_nps_g.csv
+new file mode 100644
+index 0000000..df9c754
+--- /dev/null
++++ b/data/nav/icici_nps_g.csv
+@@ -0,0 +1,2 @@
++Date,NAV
++2026-09-06,38.6797
+diff --git a/data/snapshots/.gitkeep b/data/snapshots/.gitkeep
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/data/snapshots/.gitkeep
+diff --git a/data/snapshots/2026-09-06.json b/data/snapshots/2026-09-06.json
+new file mode 100644
+index 0000000..ec78b63
+--- /dev/null
++++ b/data/snapshots/2026-09-06.json
+@@ -0,0 +1,41 @@
++{
++  "date": "2026-09-06",
++  "total_value": 287301.1766,
++  "holdings": [
++    {
++      "id": "kotak_multicap",
++      "name": "Kotak Multicap Fund - Regular Plan - Growth",
++      "units": 4925.862069,
++      "nav": 20.18,
++      "value": 99403.8966
++    },
++    {
++      "id": "tata_aia_mmqi",
++      "name": "Tata AIA Multicap Momentum Quality Index Fund",
++      "units": 4805.280964,
++      "nav": 9.3108,
++      "value": 44741.01
++    },
++    {
++      "id": "icici_nps_e",
++      "name": "ICICI Prudential Pension Fund \u2014 Scheme E",
++      "units": 976.305872,
++      "nav": 74.2416,
++      "value": 72482.51
++    },
++    {
++      "id": "icici_nps_c",
++      "name": "ICICI Prudential Pension Fund \u2014 Scheme C",
++      "units": 911.668939,
++      "nav": 46.5038,
++      "value": 42396.07
++    },
++    {
++      "id": "icici_nps_g",
++      "name": "ICICI Prudential Pension Fund \u2014 Scheme G",
++      "units": 731.073147,
++      "nav": 38.6797,
++      "value": 28277.69
++    }
++  ]
++}
+diff --git a/utils/funds.py b/utils/funds.py
+index fb9bfbe..8676745 100644
+--- a/utils/funds.py
++++ b/utils/funds.py
+@@ -13,7 +13,7 @@ from utils.config import _REPO_ROOT
+ 
+ FUNDS_YAML_PATH = _REPO_ROOT / "config" / "funds.yaml"
+ 
+-FundType = Literal["mutual_fund", "ulip"]
++FundType = Literal["mutual_fund", "ulip", "nps"]
+ NavSource = Literal["mfapi", "file"]
+ 
+ 
+diff --git a/utils/snapshots.py b/utils/snapshots.py
+new file mode 100644
+index 0000000..43dd2cd
+--- /dev/null
++++ b/utils/snapshots.py
+@@ -0,0 +1,159 @@
++"""Daily portfolio snapshot persistence under data/snapshots/."""
++
++from __future__ import annotations
++
++import json
++from datetime import date, datetime
++from pathlib import Path
++from typing import Any, Iterable, Mapping, Sequence
++
++from utils.config import DATA_DIR
++from utils.funds import FundConfig
++
++SNAPSHOTS_DIR = DATA_DIR / "snapshots"
++
++
++def _ensure_dir() -> Path:
++    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
++    return SNAPSHOTS_DIR
++
++
++def _date_str(value: date | datetime | str) -> str:
++    if isinstance(value, datetime):
++        return value.date().isoformat()
++    if isinstance(value, date):
++        return value.isoformat()
++    return str(value)[:10]
++
++
++def snapshot_path(snap_date: date | datetime | str) -> Path:
++    return _ensure_dir() / f"{_date_str(snap_date)}.json"
++
++
++def save_snapshot(
++    snap_date: date | datetime | str,
++    holdings: Sequence[Mapping[str, Any]],
++    total_value: float,
++) -> Path:
++    """Persist a portfolio snapshot for ``snap_date`` (overwrites same day)."""
++    path = snapshot_path(snap_date)
++    payload = {
++        "date": _date_str(snap_date),
++        "total_value": round(float(total_value), 4),
++        "holdings": [
++            {
++                "id": h["id"],
++                "name": h["name"],
++                "units": round(float(h["units"]), 6),
++                "nav": round(float(h["nav"]), 4),
++                "value": round(float(h["value"]), 4),
++            }
++            for h in holdings
++        ],
++    }
++    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
++    return path
++
++
++def load_snapshot(snap_date: date | datetime | str) -> dict[str, Any] | None:
++    path = snapshot_path(snap_date)
++    if not path.is_file():
++        return None
++    return json.loads(path.read_text(encoding="utf-8"))
++
++
++def list_snapshots() -> list[str]:
++    """Return snapshot dates (YYYY-MM-DD) newest first."""
++    _ensure_dir()
++    dates = sorted(
++        (p.stem for p in SNAPSHOTS_DIR.glob("*.json") if p.is_file()),
++        reverse=True,
++    )
++    return dates
++
++
++def latest_snapshot() -> dict[str, Any] | None:
++    dates = list_snapshots()
++    if not dates:
++        return None
++    return load_snapshot(dates[0])
++
++
++def day_over_day(
++    prev: Mapping[str, Any] | None,
++    curr: Mapping[str, Any] | None,
++) -> dict[str, Any]:
++    """Compare two snapshots; returns delta_value / delta_pct / per-holding deltas."""
++    if not curr:
++        return {
++            "delta_value": None,
++            "delta_pct": None,
++            "prev_total": None,
++            "curr_total": None,
++            "holdings": [],
++        }
++    curr_total = float(curr.get("total_value") or 0.0)
++    if not prev:
++        return {
++            "delta_value": None,
++            "delta_pct": None,
++            "prev_total": None,
++            "curr_total": curr_total,
++            "holdings": [],
++        }
++    prev_total = float(prev.get("total_value") or 0.0)
++    delta_value = round(curr_total - prev_total, 4)
++    delta_pct = (
++        round((curr_total / prev_total - 1.0) * 100.0, 4) if prev_total else None
++    )
++    prev_by_id = {h["id"]: h for h in prev.get("holdings") or []}
++    holding_deltas = []
++    for h in curr.get("holdings") or []:
++        prior = prev_by_id.get(h["id"])
++        prior_val = float(prior["value"]) if prior else None
++        curr_val = float(h["value"])
++        holding_deltas.append(
++            {
++                "id": h["id"],
++                "name": h["name"],
++                "prev_value": prior_val,
++                "curr_value": curr_val,
++                "delta_value": (
++                    round(curr_val - prior_val, 4) if prior_val is not None else None
++                ),
++            }
++        )
++    return {
++        "delta_value": delta_value,
++        "delta_pct": delta_pct,
++        "prev_total": prev_total,
++        "curr_total": curr_total,
++        "holdings": holding_deltas,
++    }
++
++
++def build_snapshot_from_funds(
++    funds: Iterable[FundConfig],
++    nav_by_id: Mapping[str, float],
++) -> tuple[list[dict[str, Any]], float]:
++    """Build holdings rows + total from fund configs and current NAVs.
++
++    Missing NAV falls back to ``purchase_nav``.
++    """
++    holdings: list[dict[str, Any]] = []
++    total = 0.0
++    for fund in funds:
++        nav = float(nav_by_id.get(fund.id, fund.purchase_nav))
++        units = float(fund.units)
++        value = round(units * nav, 4)
++        total += value
++        holdings.append(
++            {
++                "id": fund.id,
++                "name": fund.name,
++                "units": units,
++                "nav": nav,
++                "value": value,
++            }
++        )
++    return holdings, round(total, 4)

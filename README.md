@@ -8,8 +8,13 @@ Default funds:
 |------|------|------------|------------|
 | Kotak Multicap Fund - Regular Plan - Growth | Mutual fund | mfapi.in | Scheme `149182` |
 | Tata AIA Multicap Momentum Quality Index Fund | ULIP | Local CSV | SFIN `ULIF 078 31/12/24 MQI 110` |
+| ICICI Prudential Pension Fund — Scheme E | NPS | Local CSV | `icici_nps_e` |
+| ICICI Prudential Pension Fund — Scheme C | NPS | Local CSV | `icici_nps_c` |
+| ICICI Prudential Pension Fund — Scheme G | NPS | Local CSV | `icici_nps_g` |
 
 > Research and scenario forecasts only — **not investment advice**. Past performance does not guarantee future results.
+
+> **Kotak cost basis:** YAML keeps `investment: 99995` @ `purchase_nav: 20.30` (units ≈ 4925.86). A user book of 4926.833 units @ 20.18 (= ₹99,423) is close but not applied — leaving YAML as-is avoids breaking the tracked cost basis.
 
 ---
 
@@ -17,8 +22,8 @@ Default funds:
 
 | Area | Capability |
 |------|------------|
-| **Multi-fund** | YAML-driven funds; one top-level tab per fund with isolated NAV / agents / forecast |
-| **Portfolio** | NAV history (mfapi or file), P&L, ROI, CAGR, drawdown, allocations |
+| **Multi-fund** | YAML-driven funds; Portfolio tab + one top-level tab per fund with isolated NAV / agents / forecast |
+| **Portfolio** | Combined allocation, day-over-day vs prior snapshot, **Save today's snapshot**; per-fund NAV / P&L / ROI / CAGR |
 | **Research** | Five analysts: Fundamentals, Sentiment, News, Technical, **Policy** |
 | **Memory** | Raw JSON under `data/raw/{fund_id}/`, Chroma with `fund_id` metadata |
 | **Forecast** | Bootstrap p10/p50/p90 trading-day paths (60 default); LLM refine clamped to baseline; walk-forward coverage |
@@ -51,6 +56,13 @@ funds:
     investment: 44741.01
     purchase_nav: 9.3108
     benchmark_symbol: "^NSEI"
+
+  - id: icici_nps_e
+    type: nps
+    nav_source: file
+    nav_file: data/nav/icici_nps_e.csv
+    investment: 72482.51
+    purchase_nav: 74.2416
 ```
 
 ### NAV sources
@@ -62,7 +74,17 @@ funds:
 
 **ULIP note:** Tata AIA Multicap Momentum Quality is a life-insurance ULIP, not an AMFI mutual fund — there is **no** mfapi scheme code. Maintain NAV by appending rows to [`data/nav/tata_aia_mmqi.csv`](data/nav/tata_aia_mmqi.csv). Seeded with purchase NAV **9.3108** (investment ₹44,741.01).
 
-**Forecasting requires ≥60 NAV observations.** Until the Tata AIA CSV has enough rows, Ask Manager / Run forecast only will refuse that fund with a clear error. Append dated NAV rows as you receive them from the insurer.
+**NPS note:** ICICI Prudential Pension Fund schemes **E / C / G** use `type: nps` and `nav_source: file`. Seeded CSVs:
+
+| File | Seed NAV (2026-09-06) | Investment |
+|------|----------------------|------------|
+| [`data/nav/icici_nps_e.csv`](data/nav/icici_nps_e.csv) | 74.2416 | ₹72,482.51 |
+| [`data/nav/icici_nps_c.csv`](data/nav/icici_nps_c.csv) | 46.5038 | ₹42,396.07 |
+| [`data/nav/icici_nps_g.csv`](data/nav/icici_nps_g.csv) | 38.6797 | ₹28,277.69 |
+
+Append a new `YYYY-MM-DD,<nav>` row each day after PFRDA / CRA publishes the NAV (same `Date,NAV` header as Tata).
+
+**Forecasting requires ≥60 NAV observations.** Until a file-NAV fund (Tata / NPS) has enough rows, Ask Manager / Run forecast only will refuse that fund with a clear error (“Need ≥60 NAV rows for forecast.”). Per-fund tabs still work for overview / allocations.
 
 ### Reliable forecasting
 
@@ -82,17 +104,23 @@ funds:
 
 ```mermaid
 flowchart TB
-  subgraph top [Top_level_fund_tabs]
+  subgraph top [Top_level_tabs]
+    P[Portfolio]
     K[Kotak_Multicap]
     T[Tata_AIA_MMQI]
+    N[ICICI_NPS_E_C_G]
   end
+  P --> snap[Combined_value_DoD_Save_snapshot]
   K --> secs1[Overview_Charts_Alloc_Agents_Forecast]
   T --> secs2[Overview_Charts_Alloc_Agents_Forecast]
+  N --> secs3[Overview_Charts_Alloc_Agents_Forecast]
   sidebar[Sidebar_actions] -->|"active_fund_id"| K
   sidebar -->|"active_fund_id"| T
+  sidebar -->|"active_fund_id"| N
 ```
 
-- One **main tab per fund** from the YAML file.
+- First tab **Portfolio**: combined total, allocation table, day-over-day vs previous snapshot, **Save today's snapshot**, snapshot date history.
+- Then one **main tab per fund** from the YAML file.
 - Inside each fund: Overview / Charts / Allocations / Agents / Forecast.
 - Sidebar **Ask Manager / Load NAV / Forecast** apply to the **active** fund (sidebar selectbox).
 - Scheduled NSE open/close runs the Manager pipeline for **all funds**.
@@ -255,7 +283,13 @@ flowchart TB
 ```
 data/
 ├── nav/
-│   └── tata_aia_mmqi.csv         # ULIP file NAV (append Date,NAV rows)
+│   ├── tata_aia_mmqi.csv         # ULIP file NAV (append Date,NAV rows)
+│   ├── icici_nps_e.csv           # NPS Scheme E file NAV
+│   ├── icici_nps_c.csv           # NPS Scheme C file NAV
+│   └── icici_nps_g.csv           # NPS Scheme G file NAV
+├── snapshots/
+│   ├── .gitkeep
+│   └── 2026-09-06.json           # seeded daily portfolio snapshot (others gitignored)
 ├── raw/
 │   └── {fund_id}/
 │       └── {run_id}/             # one folder per pipeline run
@@ -302,7 +336,7 @@ revops/
 │   ├── research/             # five analysts incl. policy
 │   ├── memory/
 │   └── rag/
-├── utils/                    # funds, config, nav, llm, charts
+├── utils/                    # funds, snapshots, config, nav, llm, charts
 ├── data/                     # runtime artifacts (gitignored; seed NAV tracked)
 └── log/
 ```
@@ -372,7 +406,8 @@ Open the URL Streamlit prints (usually `http://localhost:8501`).
 4. Toggle **Use local LLM** on.
 5. Click **Ask Manager: run now** (active fund only).
 6. Open that fund’s **Agents** / **Forecast** tabs.
-7. For Tata AIA ULIP: append NAV rows to `data/nav/tata_aia_mmqi.csv` until you have **≥60** points before forecasting.
+7. For Tata AIA ULIP / ICICI NPS: append NAV rows to the matching `data/nav/*.csv` until you have **≥60** points before forecasting.
+8. Open the **Portfolio** tab → review combined value → **Save today's snapshot** (writes `data/snapshots/YYYY-MM-DD.json`).
 
 Heartbeat badges refresh about every 60s. After a Manager run, servers should show down until the next LLM pipeline (or manual **Start servers**).
 
@@ -400,6 +435,7 @@ flowchart LR
 - **Ask Manager: run now** — full research + memory + trading-day scenario forecast for the **active** fund; ignores NSE clock. Analyst fan-out respects **Max parallel calls**.
 - **Run forecast only** — active fund only; bootstrap (± LLM) on **full** NAV; no analysts.
 - **Scheduled research** — automatic at NSE open **09:15** and close **15:30** IST; **all funds** queued with the same concurrency limit.
+- **Save today's snapshot** (Portfolio tab) — persist combined holdings + total under `data/snapshots/` for day-over-day.
 
 ---
 
@@ -425,6 +461,8 @@ flowchart LR
 | Forecast fails / blocked | <60 NAV rows (common for Tata file NAV) | Append `Date,NAV` rows; check Forecast error banner |
 | Forecast fails with LLM on | Chat server or bad JSON | Falls back to bootstrap; check `log/llama_chat.log` / LLM response tab |
 | Tata AIA empty / stale NAV | File not updated | Append `Date,NAV` to `data/nav/tata_aia_mmqi.csv` |
+| NPS empty / stale NAV | File not updated | Append `Date,NAV` to `data/nav/icici_nps_{e,c,g}.csv` |
+| No day-over-day on Portfolio | Only one snapshot | Save today's snapshot on consecutive days |
 | Reddit / news empty | Network or rate limit | Check `data/raw/{fund_id}/.../meta` |
 | Schedule never fires | Weekend or already completed | Check sidebar “Next slot” / last completed |
 

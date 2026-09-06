@@ -1,0 +1,41 @@
+{
+  "date": "2026-09-06",
+  "total_value": 287301.1766,
+  "holdings": [
+    {
+      "id": "kotak_multicap",
+      "name": "Kotak Multicap Fund - Regular Plan - Growth",
+      "units": 4925.862069,
+      "nav": 20.18,
+      "value": 99403.8966
+    },
+    {
+      "id": "tata_aia_mmqi",
+      "name": "Tata AIA Multicap Momentum Quality Index Fund",
+      "units": 4805.280964,
+      "nav": 9.3108,
+      "value": 44741.01
+    },
+    {
+      "id": "icici_nps_e",
+      "name": "ICICI Prudential Pension Fund \u2014 Scheme E",
+      "units": 976.305872,
+      "nav": 74.2416,
+      "value": 72482.51
+    },
+    {
+      "id": "icici_nps_c",
+      "name": "ICICI Prudential Pension Fund \u2014 Scheme C",
+      "units": 911.668939,
+      "nav": 46.5038,
+      "value": 42396.07
+    },
+    {
+      "id": "icici_nps_g",
+      "name": "ICICI Prudential Pension Fund \u2014 Scheme G",
+      "units": 731.073147,
+      "nav": 38.6797,
+      "value": 28277.69
+    }
+  ]
+}

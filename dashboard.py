@@ -52,6 +52,13 @@ from utils.portfolio import (
     get_sector_dataframe,
     inr,
 )
+from utils.snapshots import (
+    build_snapshot_from_funds,
+    day_over_day,
+    list_snapshots,
+    load_snapshot,
+    save_snapshot,
+)
 
 FUNDS = load_funds()
 
@@ -61,6 +68,7 @@ st.set_page_config(
     layout="wide",
 )
 
+TAB_PORTFOLIO = ":material/account_balance_wallet: Portfolio"
 TAB_OVERVIEW = ":material/dashboard: Overview"
 TAB_CHARTS = ":material/show_chart: Charts"
 TAB_ALLOC = ":material/pie_chart: Allocations"
@@ -899,6 +907,176 @@ def _render_fund_workspace(
                 st.json(display_features)
 
 
+def _current_nav_for_fund(fund: FundConfig) -> float:
+    """Latest NAV from session cache / file / purchase_nav fallback."""
+    fs = _fs(fund.id)
+    full_df = fs.get("nav_df_full")
+    if full_df is not None and not full_df.empty:
+        return float(full_df.iloc[-1]["NAV"])
+    if fund.nav_source == "file":
+        try:
+            nav_df = fetch_nav_history_for_fund(fund)
+            if not nav_df.empty:
+                return float(nav_df.iloc[-1]["NAV"])
+        except Exception:  # noqa: BLE001
+            pass
+    return float(fund.purchase_nav)
+
+
+def _render_portfolio_workspace() -> None:
+    """Combined allocation, day-over-day, and snapshot controls."""
+    st.caption(
+        "Combined view of all funds in `config/funds.yaml`. "
+        f"Need ≥{MIN_FORECAST_OBSERVATIONS} NAV rows for forecast on a fund tab."
+    )
+
+    nav_by_id = {f.id: _current_nav_for_fund(f) for f in FUNDS}
+    holdings, total_value = build_snapshot_from_funds(FUNDS, nav_by_id)
+
+    alloc_rows = []
+    for h in holdings:
+        weight = (h["value"] / total_value * 100.0) if total_value else 0.0
+        alloc_rows.append(
+            {
+                "Fund": h["name"],
+                "Id": h["id"],
+                "Units": h["units"],
+                "NAV": h["nav"],
+                "Value": h["value"],
+                "Allocation %": round(weight, 2),
+            }
+        )
+    alloc_df = pd.DataFrame(alloc_rows)
+
+    st.subheader("Combined portfolio")
+    with st.container(horizontal=True):
+        st.metric("Total value", inr(total_value, 2), border=True)
+        st.metric("Funds", str(len(FUNDS)), border=True)
+        invested = sum(f.investment for f in FUNDS)
+        st.metric("Cost basis", inr(invested, 2), border=True)
+        st.metric(
+            "P&L",
+            inr(total_value - invested, 2),
+            delta=f"{((total_value / invested - 1) * 100) if invested else 0:.2f}%",
+            border=True,
+        )
+
+    st.dataframe(
+        alloc_df,
+        column_config={
+            "Fund": st.column_config.TextColumn("Fund"),
+            "Id": st.column_config.TextColumn("Id"),
+            "Units": st.column_config.NumberColumn("Units", format="%.4f"),
+            "NAV": st.column_config.NumberColumn("NAV", format="₹%.4f"),
+            "Value": st.column_config.NumberColumn("Value", format="₹%.2f"),
+            "Allocation %": st.column_config.NumberColumn(
+                "Allocation %", format="%.2f%%"
+            ),
+        },
+        hide_index=True,
+        width="stretch",
+    )
+
+    dates = list_snapshots()
+    # Compare live totals to the latest *prior* snapshot date (not today).
+    dod_curr = {
+        "date": date.today().isoformat(),
+        "total_value": total_value,
+        "holdings": holdings,
+    }
+    dod_prev = None
+    today_iso = date.today().isoformat()
+    for snap_date in dates:
+        if snap_date != today_iso:
+            dod_prev = load_snapshot(snap_date)
+            break
+    # If only today's snapshot exists, compare live vs yesterday when available.
+    if dod_prev is None and len(dates) >= 2:
+        dod_prev = load_snapshot(dates[1])
+        dod_curr = load_snapshot(dates[0]) or dod_curr
+
+    dod = day_over_day(dod_prev, dod_curr)
+    st.subheader("Day-over-day")
+    if dod["delta_value"] is None:
+        st.info(
+            "No previous snapshot to compare. Save today's snapshot, then "
+            "compare on a later day."
+        )
+    else:
+        with st.container(horizontal=True):
+            st.metric(
+                "Δ value",
+                inr(dod["delta_value"], 2),
+                delta=(
+                    f"{dod['delta_pct']:.2f}%"
+                    if dod["delta_pct"] is not None
+                    else None
+                ),
+                border=True,
+            )
+            st.metric(
+                "Previous total",
+                inr(dod["prev_total"], 2) if dod["prev_total"] is not None else "—",
+                border=True,
+            )
+            st.metric(
+                "Current total",
+                inr(dod["curr_total"], 2) if dod["curr_total"] is not None else "—",
+                border=True,
+            )
+        if dod["holdings"]:
+            dod_df = pd.DataFrame(
+                [
+                    {
+                        "Fund": row["name"],
+                        "Previous": row["prev_value"],
+                        "Current": row["curr_value"],
+                        "Δ": row["delta_value"],
+                    }
+                    for row in dod["holdings"]
+                ]
+            )
+            st.dataframe(
+                dod_df,
+                column_config={
+                    "Fund": st.column_config.TextColumn("Fund"),
+                    "Previous": st.column_config.NumberColumn(
+                        "Previous", format="₹%.2f"
+                    ),
+                    "Current": st.column_config.NumberColumn(
+                        "Current", format="₹%.2f"
+                    ),
+                    "Δ": st.column_config.NumberColumn("Δ", format="₹%.2f"),
+                },
+                hide_index=True,
+                width="stretch",
+            )
+
+    col_save, col_hist = st.columns([1, 2])
+    with col_save:
+        if st.button(
+            "Save today's snapshot",
+            type="primary",
+            icon=":material/save:",
+            width="stretch",
+            help="Write data/snapshots/YYYY-MM-DD.json from current NAVs",
+        ):
+            out = save_snapshot(date.today(), holdings, total_value)
+            st.success(f"Saved snapshot for {date.today().isoformat()} → `{out}`")
+            st.rerun()
+    with col_hist:
+        st.caption("Snapshot history")
+        if dates:
+            st.write(", ".join(dates[:12]) + ("…" if len(dates) > 12 else ""))
+        else:
+            st.write("No snapshots yet.")
+
+    st.caption(
+        "NPS / ULIP file NAV: append `Date,NAV` rows under `data/nav/`. "
+        f"Forecast needs ≥{MIN_FORECAST_OBSERVATIONS} NAV observations."
+    )
+
+
 # ---------------------------------------------------------------------------
 # App body
 # ---------------------------------------------------------------------------
@@ -1258,8 +1436,11 @@ if run_forecast:
                     f"main_tabs_{active_fund.id}_forecast", None
                 )
 
-fund_tabs = st.tabs([f.name for f in FUNDS])
-for tab, fund in zip(fund_tabs, FUNDS):
+top_labels = [TAB_PORTFOLIO] + [f.name for f in FUNDS]
+top_tabs = st.tabs(top_labels)
+with top_tabs[0]:
+    _render_portfolio_workspace()
+for tab, fund in zip(top_tabs[1:], FUNDS):
     with tab:
         _render_fund_workspace(fund, start_date, end_date)
 
